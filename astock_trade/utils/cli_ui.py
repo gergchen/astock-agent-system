@@ -33,7 +33,7 @@ def _pct_raw(v: float, suffix: str = "%") -> Text:
     return t
 
 
-def _bool_tag(ok: bool, yes: str = "✓", no: str = "✗") -> Text:
+def _bool_tag(ok: bool, yes: str = "OK", no: str = "FAIL") -> Text:
     t = Text(yes if ok else no)
     t.stylize("bold green" if ok else "bold red")
     return t
@@ -42,24 +42,37 @@ def _bool_tag(ok: bool, yes: str = "✓", no: str = "✗") -> Text:
 # ── Reusable builders ───────────────────────────────────────────────────
 
 
+_COL_MAP = {
+    "name/symbol": "策略/代码 | Strategy",
+    "total_return": "总收益 | Return",
+    "annual_return": "年化 | Annual",
+    "sharpe": "夏普 | Sharpe",
+    "drawdown": "回撤 | DD",
+    "win_rate": "胜率 | Win",
+    "trades": "交易 | Trades",
+    "alpha": "Alpha",
+    "beta": "Beta",
+}
+
+
 def backtest_result_table(
     rows: list[dict[str, Any]],
-    title: str = "回测结果",
+    title: str = "回测结果 | Backtest Results",
     show_benchmark: bool = False,
 ) -> Table:
     """Build a table from backtest result dicts."""
     table = Table(title=title, title_style="bold", border_style="blue")
-    table.add_column("策略/代码", style="cyan", no_wrap=True)
-    table.add_column("总收益", justify="right")
-    table.add_column("年化", justify="right")
-    table.add_column("夏普", justify="right")
-    table.add_column("回撤", justify="right")
-    table.add_column("胜率", justify="right")
-    table.add_column("交易", justify="right")
+    table.add_column(_COL_MAP["name/symbol"], style="cyan", no_wrap=True)
+    table.add_column(_COL_MAP["total_return"], justify="right")
+    table.add_column(_COL_MAP["annual_return"], justify="right")
+    table.add_column(_COL_MAP["sharpe"], justify="right")
+    table.add_column(_COL_MAP["drawdown"], justify="right")
+    table.add_column(_COL_MAP["win_rate"], justify="right")
+    table.add_column(_COL_MAP["trades"], justify="right")
 
     if show_benchmark:
-        table.add_column("Alpha", justify="right")
-        table.add_column("Beta", justify="right")
+        table.add_column(_COL_MAP["alpha"], justify="right")
+        table.add_column(_COL_MAP["beta"], justify="right")
 
     for row in rows:
         cols = [
@@ -88,28 +101,28 @@ def backtest_report_panel(
 ) -> Panel:
     """Rich Panel summarising a single backtest run."""
     lines = [
-        f"初始资金:  {metrics.get('start_value', 0):>12,.0f}     "
-        f"最终净值:  {metrics.get('end_value', 0):>12,.0f}",
+        f"初始资金 / Initial:  {metrics.get('start_value', 0):>12,.0f}     "
+        f"最终净值 / Final:  {metrics.get('end_value', 0):>12,.0f}",
         "",
-        f"  总收益率:  {_pct(metrics.get('total_return_pct', 0))}        "
-        f"年化收益:  {_pct(metrics.get('annual_return_pct', 0))}",
-        f"  夏普比率:  {metrics.get('sharpe_ratio', 0):>8.2f}            "
-        f"最大回撤:  {Text(f'{metrics.get('max_drawdown_pct', 0):.2f}%', style='yellow')}",
+        f"  总收益率 / Return:   {_pct(metrics.get('total_return_pct', 0))}        "
+        f"年化 / Annual:  {_pct(metrics.get('annual_return_pct', 0))}",
+        f"  夏普 / Sharpe:  {metrics.get('sharpe_ratio', 0):>8.2f}            "
+        f"最大回撤 / Max DD:  {Text(f'{metrics.get('max_drawdown_pct', 0):.2f}%', style='yellow')}",
         "",
-        f"  总交易:    {metrics.get('total_trades', 0):>6}               "
-        f"胜率:      {metrics.get('win_rate_pct', 0):>6.1f}%",
-        f"  盈利/亏损: {metrics.get('winning_trades', 0)} / {metrics.get('losing_trades', 0)}        "
-        f"盈亏比:    {metrics.get('profit_factor', 0):>5.2f}",
-        f"  平均盈利:  {_pct(metrics.get('avg_win_pct', 0))}          "
-        f"平均亏损:  {Text(f'{metrics.get('avg_loss_pct', 0):.2f}%', style='red')}",
+        f"  交易次数 / Trades:  {metrics.get('total_trades', 0):>6}               "
+        f"胜率 / Win Rate:  {metrics.get('win_rate_pct', 0):>6.1f}%",
+        f"  盈利/亏损 / W/L: {metrics.get('winning_trades', 0)} / {metrics.get('losing_trades', 0)}        "
+        f"盈亏比 / P/L Ratio:  {metrics.get('profit_factor', 0):>5.2f}",
+        f"  平均盈利 / Avg Win:  {_pct(metrics.get('avg_win_pct', 0))}          "
+        f"平均亏损 / Avg Loss:  {Text(f'{metrics.get('avg_loss_pct', 0):.2f}%', style='red')}",
     ]
 
     if benchmarks:
         lines.append("")
         for bm_name, bm in benchmarks.items():
             lines.append(
-                f"  [{bm_name}]  收益: {_pct(bm.get('benchmark_return_pct', 0))}  "
-                f"超额: {_pct(bm.get('excess_return_pct', 0))}  "
+                f"  [{bm_name}]  收益/Return: {_pct(bm.get('benchmark_return_pct', 0))}  "
+                f"超额/Excess: {_pct(bm.get('excess_return_pct', 0))}  "
                 f"Alpha: {_pct_raw(bm.get('alpha', 0))}  "
                 f"Beta: {bm.get('beta', 0):.3f}  "
                 f"IR: {bm.get('information_ratio', 0):.2f}"
@@ -132,7 +145,7 @@ def status_dashboard(data: dict[str, Any]) -> Layout:
     layout["header"].update(
         Panel(
             f"astock-trade v{version}    "
-            f"数据目录: {data.get('data_dir', '?')}",
+            f"数据目录 / Data: {data.get('data_dir', '?')}",
             style="bold white on blue",
         )
     )
@@ -145,15 +158,15 @@ def status_dashboard(data: dict[str, Any]) -> Layout:
 
     # Left: services & config
     left_lines = [
-        f"密钥服务: {len(data.get('vault_services', []))} 个",
-        f"策略数:   {len(data.get('strategies', []))}",
-        f"自选股:   {sum(len(w.get('symbols', w.get('items', []))) for w in data.get('watchlists', []) if isinstance(w, dict))} 只",
+        f"密钥 / Vault: {len(data.get('vault_services', []))} 个",
+        f"策略 / Strategies: {len(data.get('strategies', []))}",
+        f"自选股 / Watchlists: {sum(len(w.get('symbols', w.get('items', []))) for w in data.get('watchlists', []) if isinstance(w, dict))} 只",
     ]
     if "trading_hours" in data:
         th = data["trading_hours"]
-        left_lines.append(f"早盘: {th.get('morning', '?')}  午盘: {th.get('afternoon', '?')}")
+        left_lines.append(f"交易时段 / Hours: {th.get('morning', '?')} | {th.get('afternoon', '?')}")
 
-    layout["left"].update(Panel("\n".join(left_lines), title="系统概览", border_style="green"))
+    layout["left"].update(Panel("\n".join(left_lines), title=f"系统概览 | Overview", border_style="green"))
 
     # Right: health (optional)
     right_parts = []
@@ -162,26 +175,26 @@ def status_dashboard(data: dict[str, Any]) -> Layout:
         overall = health.get("overall", "unknown")
         style = "bold green" if overall == "ok" else "bold yellow" if overall == "degraded" else "bold red"
         right_parts.append(
-            f"整体状态: {Text(overall.upper(), style=style)}"
+            f"整体 / Status: {Text(overall.upper(), style=style)}"
         )
         right_parts.append(
-            f"运行时间: {health.get('uptime_h', 0):.1f}h    "
-            f"内存: {health.get('memory_mb', 0):.0f}MB"
+            f"运行时间 / Uptime: {health.get('uptime_h', 0):.1f}h    "
+            f"内存 / Memory: {health.get('memory_mb', 0):.0f}MB"
         )
         right_parts.append(
-            f"子系統: ok={health.get('ok', 0)}  "
+            f"子系统 / Subsystems: ok={health.get('ok', 0)}  "
             f"degraded={health.get('degraded', 0)}  "
             f"down={health.get('down', 0)}"
         )
         subs = health.get("subsystems", [])
         if subs:
             sub_table = Table(show_header=False, box=None, padding=(0, 1))
-            sub_table.add_column("子系统")
-            sub_table.add_column("状态")
-            sub_table.add_column("详情")
+            sub_table.add_column("子系统 | Subsystem")
+            sub_table.add_column("状态 | Status")
+            sub_table.add_column("详情 | Detail")
             for s in subs:
                 st = s.get("status", "?")
-                tag = _bool_tag(st == "ok", "✓", st == "down" and "✗" or "~")
+                tag = _bool_tag(st == "ok", "OK", st == "down" and "DOWN" or "WARN")
                 sub_table.add_row(s.get("name", ""), tag, s.get("detail", ""))
             right_parts.append("")
             right_parts.append(sub_table)
@@ -189,12 +202,12 @@ def status_dashboard(data: dict[str, Any]) -> Layout:
         alerts = data.get("recent_alerts")
         if alerts:
             right_parts.append("")
-            right_parts.append(Text(f"最近告警: {len(alerts)} 条", style="bold yellow"))
+            right_parts.append(Text(f"告警 / Alerts: {len(alerts)} 条", style="bold yellow"))
     else:
-        right_parts.append("(使用 --health 查看详细健康检查)")
+        right_parts.append("(使用 --health 查看详情 | Use --health for details)")
 
     layout["right"].update(
-        Panel("\n".join(str(s) for s in right_parts), title="运行状态", border_style="blue")
+        Panel("\n".join(str(s) for s in right_parts), title=f"运行状态 | Status", border_style="blue")
     )
 
     return layout
@@ -202,10 +215,10 @@ def status_dashboard(data: dict[str, Any]) -> Layout:
 
 def watchlist_table(watchlists: list[dict]) -> Table:
     """Format watchlists for display."""
-    table = Table(title="自选股列表", border_style="green")
-    table.add_column("名称", style="cyan")
-    table.add_column("股票代码", style="white")
-    table.add_column("数量", justify="right")
+    table = Table(title="自选股列表 | Watchlists", border_style="green")
+    table.add_column("名称 | Name", style="cyan")
+    table.add_column("代码 | Symbols", style="white")
+    table.add_column("数量 | Count", justify="right")
     for wl in watchlists:
         symbols = wl.get("symbols", wl.get("items", []))
         table.add_row(
@@ -218,14 +231,14 @@ def watchlist_table(watchlists: list[dict]) -> Table:
 
 def trade_journal_table(trades: list[dict]) -> Table:
     """Format trade journal entries."""
-    table = Table(title=f"交易记录 ({len(trades)} 笔)", border_style="yellow")
-    table.add_column("日期", style="cyan")
-    table.add_column("代码", style="white")
-    table.add_column("方向")
-    table.add_column("价格", justify="right")
-    table.add_column("数量", justify="right")
-    table.add_column("盈亏", justify="right")
-    table.add_column("策略", style="dim")
+    table = Table(title=f"交易记录 | Trades ({len(trades)})", border_style="yellow")
+    table.add_column("日期 | Date", style="cyan")
+    table.add_column("代码 | Symbol", style="white")
+    table.add_column("方向 | Side")
+    table.add_column("价格 | Price", justify="right")
+    table.add_column("数量 | Shares", justify="right")
+    table.add_column("盈亏 | P&L", justify="right")
+    table.add_column("策略/备注 | Strategy", style="dim")
 
     for t in trades:
         direction = t.get("direction", "")
@@ -252,15 +265,15 @@ def trade_journal_table(trades: list[dict]) -> Table:
 def pnl_summary_table(summary: dict) -> Panel:
     """Daily P&L summary panel."""
     lines = [
-        f"  总盈亏:      {_pct(summary.get('total_pnl', 0))}",
-        f"  总交易:      {summary.get('total_trades', 0)} 笔",
-        f"  盈利交易:    {summary.get('winning_trades', 0)}",
-        f"  亏损交易:    {summary.get('losing_trades', 0)}",
-        f"  胜率:        {summary.get('win_rate', 0):.1f}%",
-        f"  最大盈利:    {_pct_raw(summary.get('max_win', 0))}",
-        f"  最大亏损:    {Text(f'{summary.get('max_loss', 0):.2f}', style='red')}",
+        f"  总盈亏 / Total P&L:  {_pct(summary.get('total_pnl', 0))}",
+        f"  交易 / Trades:  {summary.get('total_trades', 0)} 笔",
+        f"  盈利 / Wins:  {summary.get('winning_trades', 0)}",
+        f"  亏损 / Losses:  {summary.get('losing_trades', 0)}",
+        f"  胜率 / Win Rate:  {summary.get('win_rate', 0):.1f}%",
+        f"  最大盈利 / Max Win:  {_pct_raw(summary.get('max_win', 0))}",
+        f"  最大亏损 / Max Loss:  {Text(f'{summary.get('max_loss', 0):.2f}', style='red')}",
     ]
-    return Panel("\n".join(lines), title="盈亏汇总", border_style="green")
+    return Panel("\n".join(lines), title="盈亏汇总 | P&L Summary", border_style="green")
 
 
 def format_risk_decision(d: dict) -> Panel:
@@ -273,20 +286,20 @@ def format_risk_decision(d: dict) -> Panel:
     }.get(decision, "bold white")
 
     lines = [
-        f"  标的:  {d.get('signal_symbol', '')}  {d.get('signal_direction', '')}  "
+        f"  标的 / Symbol:  {d.get('signal_symbol', '')}  {d.get('signal_direction', '')}  "
         f"{d.get('signal_price', 0):.2f} × {d.get('signal_volume', 0)}",
-        f"  调整后量:  {d.get('adjusted_volume', 0)}",
-        f"  原因:  {d.get('reason', '')}",
+        f"  调整后量 / Adj. Volume:  {d.get('adjusted_volume', 0)}",
+        f"  原因 / Reason:  {d.get('reason', '')}",
         "",
-        "  检查明细:",
+        "  检查明细 / Checks:",
     ]
     for c in d.get("check_details", []):
         ok = c.get("passed", False)
-        prefix = _bool_tag(ok, "  ✓", "  ✗")
+        prefix = _bool_tag(ok, "  PASS", "  FAIL")
         lines.append(f"    {prefix}  {c.get('rule', '')}  —  {c.get('detail', '')}")
 
     return Panel(
         "\n".join(str(s) for s in lines),
-        title=Text(f"风控决策: {decision}", style=dec_style),
+        title=Text(f"风控决策 | Risk: {decision}", style=dec_style),
         border_style=dec_style.split()[-1] if " " in dec_style else dec_style,
     )

@@ -21,21 +21,21 @@ from .utils.cli_ui import console
 
 app = typer.Typer(
     name="astock-trade",
-    help="A-Stock Trade — personal & multi-agent trading system.",
+    help="A股多Agent交易系统 | A-Stock Multi-Agent Trading System",
     add_completion=False,
 )
 
-journal_app = typer.Typer(help="Trade journal — record and query trades")
-strategy_app = typer.Typer(help="Strategy store — versioned strategy configs")
-watchlist_app = typer.Typer(help="Watchlist management")
-vault_app = typer.Typer(help="Credential vault — encrypted API key storage")
-broker_app = typer.Typer(help="Broker — place orders and check positions")
+journal_app = typer.Typer(help="交易日志 | Trade journal — record and query trades")
+strategy_app = typer.Typer(help="策略存储 | Strategy store — versioned configs")
+watchlist_app = typer.Typer(help="自选股 | Watchlist management")
+vault_app = typer.Typer(help="凭证库 | Credential vault — encrypted API key storage")
+broker_app = typer.Typer(help="交易 | Broker — place orders and check positions")
 
 app.add_typer(journal_app, name="journal")
 app.add_typer(strategy_app, name="strategy")
 app.add_typer(watchlist_app, name="watchlist")
 app.add_typer(vault_app, name="vault")
-backtest_app = typer.Typer(help="Backtest — replay history through strategies")
+backtest_app = typer.Typer(help="回测 | Backtest — replay history through strategies")
 app.add_typer(broker_app, name="broker")
 app.add_typer(backtest_app, name="backtest")
 
@@ -59,14 +59,14 @@ def _emit(data, fmt: str = "json"):
 
 @journal_app.command(name="record")
 def journal_record(
-    symbol: str = typer.Argument(..., help="6-digit stock code"),
-    direction: str = typer.Argument(..., help="BUY or SELL"),
-    price: float = typer.Argument(..., help="Trade price"),
-    volume: int = typer.Argument(..., help="Trade volume (shares, multiples of 100)"),
-    strategy: Optional[str] = typer.Option(None, "-s", help="Strategy name"),
-    notes: Optional[str] = typer.Option(None, "-n", help="Trade notes"),
+    symbol: str = typer.Argument(..., help="股票代码, 6位 | 6-digit stock code"),
+    direction: str = typer.Argument(..., help="买卖方向 | BUY or SELL"),
+    price: float = typer.Argument(..., help="成交价 | Trade price"),
+    volume: int = typer.Argument(..., help="数量(股) | Trade volume (shares, multiples of 100)"),
+    strategy: Optional[str] = typer.Option(None, "-s", help="策略名称 | Strategy name"),
+    notes: Optional[str] = typer.Option(None, "-n", help="备注 | Trade notes"),
 ):
-    """Record a trade in the journal."""
+    """记录一笔交易 | Record a trade in the journal."""
     from .trade_journal import record_trade
     trade = record_trade(symbol, direction, price, volume, strategy, notes)
     _emit(trade)
@@ -74,12 +74,12 @@ def journal_record(
 
 @journal_app.command(name="query")
 def journal_query(
-    start_date: Optional[str] = typer.Option(None, "--start", help="Start date YYYY-MM-DD"),
-    end_date: Optional[str] = typer.Option(None, "--end", help="End date YYYY-MM-DD"),
-    symbol: Optional[str] = typer.Option(None, "--symbol", help="Filter by symbol"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    start_date: Optional[str] = typer.Option(None, "--start", help="开始日期 | Start date YYYY-MM-DD"),
+    end_date: Optional[str] = typer.Option(None, "--end", help="结束日期 | End date YYYY-MM-DD"),
+    symbol: Optional[str] = typer.Option(None, "--symbol", help="筛选代码 | Filter by symbol"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """Query trade records in date range."""
+    """查询交易记录 | Query trade records in date range."""
     from .trade_journal import query_trades
     sd = date.fromisoformat(start_date) if start_date else date.today()
     ed = date.fromisoformat(end_date) if end_date else date.today()
@@ -93,10 +93,10 @@ def journal_query(
 
 @journal_app.command(name="pnl")
 def journal_pnl(
-    d: Optional[str] = typer.Option(None, "--date", "-d", help="Date YYYY-MM-DD"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    d: Optional[str] = typer.Option(None, "--date", "-d", help="日期 | Date YYYY-MM-DD"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """Compute daily P&L."""
+    """计算每日盈亏 | Compute daily P&L."""
     from .trade_journal import daily_pnl
     dt = date.fromisoformat(d) if d else date.today()
     result = daily_pnl(dt)
@@ -109,11 +109,11 @@ def journal_pnl(
 
 @journal_app.command(name="summary")
 def journal_summary(
-    start_date: str = typer.Option(..., "--start", help="Start date YYYY-MM-DD"),
-    end_date: str = typer.Option(..., "--end", help="End date YYYY-MM-DD"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    start_date: str = typer.Option(..., "--start", help="开始日期 | Start date YYYY-MM-DD"),
+    end_date: str = typer.Option(..., "--end", help="结束日期 | End date YYYY-MM-DD"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """Aggregated trade summary over a date range."""
+    """交易汇总 | Aggregated trade summary over a date range."""
     from .trade_journal import trade_summary
     result = trade_summary(date.fromisoformat(start_date), date.fromisoformat(end_date))
     if json_out:
@@ -127,10 +127,10 @@ def journal_summary(
 
 @strategy_app.command(name="save")
 def strategy_save(
-    name: str = typer.Argument(..., help="Strategy name"),
-    params_json: str = typer.Argument(..., help="Strategy params as JSON string"),
+    name: str = typer.Argument(..., help="策略名称 | Strategy name"),
+    params_json: str = typer.Argument(..., help="策略参数JSON | Strategy params as JSON string"),
 ):
-    """Save a strategy (appends a new version)."""
+    """保存策略（追加新版本）| Save a strategy (appends a new version)."""
     from .strategy_store import save_strategy
     params = json.loads(params_json)
     p = save_strategy(name, params)
@@ -139,10 +139,10 @@ def strategy_save(
 
 @strategy_app.command(name="load")
 def strategy_load(
-    name: str = typer.Argument(..., help="Strategy name"),
-    version: Optional[int] = typer.Option(None, "-v", help="Specific version"),
+    name: str = typer.Argument(..., help="策略名称 | Strategy name"),
+    version: Optional[int] = typer.Option(None, "-v", help="指定版本 | Specific version"),
 ):
-    """Load a strategy (latest version by default)."""
+    """加载策略（默认最新版）| Load a strategy (latest version by default)."""
     from .strategy_store import load_strategy
     params = load_strategy(name, version)
     _emit({"name": name, "version": version, "params": params})
@@ -150,16 +150,16 @@ def strategy_load(
 
 @strategy_app.command(name="list")
 def strategy_list():
-    """List all saved strategies."""
+    """列出所有策略 | List all saved strategies."""
     from .strategy_store import list_strategies
     _emit(list_strategies())
 
 
 @strategy_app.command(name="history")
 def strategy_history(
-    name: str = typer.Argument(..., help="Strategy name"),
+    name: str = typer.Argument(..., help="策略名称 | Strategy name"),
 ):
-    """Get all versions of a strategy."""
+    """查看所有版本 | Get all versions of a strategy."""
     from .strategy_store import get_strategy_history
     _emit(get_strategy_history(name))
 
@@ -168,11 +168,11 @@ def strategy_history(
 
 @watchlist_app.command(name="save")
 def watchlist_save(
-    user_id: str = typer.Option("default", "--user", "-u", help="User ID"),
-    name: str = typer.Argument(..., help="Watchlist name"),
-    symbols: list[str] = typer.Argument(..., help="Stock symbols"),
+    user_id: str = typer.Option("default", "--user", "-u", help="用户ID | User ID"),
+    name: str = typer.Argument(..., help="自选股名称 | Watchlist name"),
+    symbols: list[str] = typer.Argument(..., help="股票代码 | Stock symbols"),
 ):
-    """Save a named watchlist."""
+    """保存自选股 | Save a named watchlist."""
     from .user_store import save_watchlist
     p = save_watchlist(user_id, name, symbols)
     _emit({"saved": str(p), "name": name, "count": len(symbols)})
@@ -180,10 +180,10 @@ def watchlist_save(
 
 @watchlist_app.command(name="get")
 def watchlist_get(
-    user_id: str = typer.Option("default", "--user", "-u", help="User ID"),
-    name: str = typer.Argument(..., help="Watchlist name"),
+    user_id: str = typer.Option("default", "--user", "-u", help="用户ID | User ID"),
+    name: str = typer.Argument(..., help="自选股名称 | Watchlist name"),
 ):
-    """Get a watchlist by name."""
+    """获取自选股 | Get a watchlist by name."""
     from .user_store import get_watchlist
     wl = get_watchlist(user_id, name)
     _emit(wl or {"error": "not found"})
@@ -191,10 +191,10 @@ def watchlist_get(
 
 @watchlist_app.command(name="list")
 def watchlist_list(
-    user_id: str = typer.Option("default", "--user", "-u", help="User ID"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    user_id: str = typer.Option("default", "--user", "-u", help="用户ID | User ID"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """List all watchlists for a user."""
+    """列出自选股 | List all watchlists for a user."""
     from .user_store import list_watchlists
     data = list_watchlists(user_id)
     if json_out:
@@ -206,10 +206,10 @@ def watchlist_list(
 
 @watchlist_app.command(name="delete")
 def watchlist_delete(
-    user_id: str = typer.Option("default", "--user", "-u", help="User ID"),
-    name: str = typer.Argument(..., help="Watchlist name"),
+    user_id: str = typer.Option("default", "--user", "-u", help="用户ID | User ID"),
+    name: str = typer.Argument(..., help="自选股名称 | Watchlist name"),
 ):
-    """Delete a watchlist."""
+    """删除自选股 | Delete a watchlist."""
     from .user_store import delete_watchlist
     ok = delete_watchlist(user_id, name)
     _emit({"deleted": ok})
@@ -219,14 +219,14 @@ def watchlist_delete(
 
 @vault_app.command(name="store")
 def vault_store(
-    service: str = typer.Argument(..., help="Service name (e.g. eastmoney, xt)"),
+    service: str = typer.Argument(..., help="服务名称(如 eastmoney, xt) | Service name"),
 ):
-    """Store credentials interactively."""
+    """交互式存储凭证 | Store credentials interactively."""
     from .keyvault import store_credential
     import getpass
-    print(f"Enter credentials for {service}:")
+    print(f"输入 {service} 凭证 | Enter credentials for {service}:")
     api_key = getpass.getpass("  API Key: ")
-    api_secret = getpass.getpass("  API Secret (optional): ")
+    api_secret = getpass.getpass("  API Secret (可选 | optional): ")
     creds = {"api_key": api_key}
     if api_secret:
         creds["api_secret"] = api_secret
@@ -236,9 +236,9 @@ def vault_store(
 
 @vault_app.command(name="load")
 def vault_load(
-    service: str = typer.Argument(..., help="Service name"),
+    service: str = typer.Argument(..., help="服务名称 | Service name"),
 ):
-    """Load stored credentials (shows keys only, not values)."""
+    """加载凭证（仅显示键名）| Load stored credentials (shows keys only)."""
     from .keyvault import load_credential
     creds = load_credential(service)
     _emit({k: "***" for k in creds})
@@ -246,9 +246,9 @@ def vault_load(
 
 @vault_app.command(name="delete")
 def vault_delete(
-    service: str = typer.Argument(..., help="Service name"),
+    service: str = typer.Argument(..., help="服务名称 | Service name"),
 ):
-    """Delete stored credentials."""
+    """删除凭证 | Delete stored credentials."""
     from .keyvault import delete_credential
     ok = delete_credential(service)
     _emit({"deleted": ok})
@@ -256,24 +256,24 @@ def vault_delete(
 
 @vault_app.command(name="list")
 def vault_list():
-    """List all services with stored credentials."""
+    """列出所有凭证服务 | List all services with stored credentials."""
     from .keyvault import list_services
     _emit(list_services())
 
 
 @app.command(name="version")
 def show_version():
-    """Show version."""
+    """显示版本 | Show version."""
     from .utils.cli_ui import console
     console.print(f"[bold cyan]astock-trade[/bold cyan] [green]v{__version__}[/green]")
 
 
 @app.command(name="status")
 def status(
-    health: bool = typer.Option(False, "--health", "-H", help="Full health check across subsystems"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    health: bool = typer.Option(False, "--health", "-H", help="健康检查 | Full health check across subsystems"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """Show system status — config, directories, vault info. Use -H for health check."""
+    """系统状态 — 配置/目录/凭证/策略/自选股 | Show system status."""
     from .keyvault import list_services
     from .user_store import list_watchlists
     from .strategy_store import list_strategies
@@ -330,9 +330,9 @@ def status(
 
 @broker_app.command(name="account")
 def broker_account(
-    ths: bool = typer.Option(False, "--ths", help="Use THS broker (virtual account)"),
+    ths: bool = typer.Option(False, "--ths", help="使用同花顺(虚拟) | Use THS broker"),
 ):
-    """Show current account status."""
+    """查看账户状态 | Show current account status."""
     if ths:
         from .broker.ths_broker import THSBroker
         b = THSBroker()
@@ -355,12 +355,12 @@ def broker_account(
 
 @broker_app.command(name="buy")
 def broker_buy(
-    symbol: str = typer.Argument(..., help="6-digit stock code"),
-    price: float = typer.Argument(..., help="Trade price"),
-    volume: int = typer.Argument(..., help="Trade volume"),
-    ths: bool = typer.Option(False, "--ths", help="Use THS broker"),
+    symbol: str = typer.Argument(..., help="6位股票代码 | 6-digit stock code"),
+    price: float = typer.Argument(..., help="买入价 | Trade price"),
+    volume: int = typer.Argument(..., help="买入数量(股) | Trade volume"),
+    ths: bool = typer.Option(False, "--ths", help="使用同花顺 | Use THS broker"),
 ):
-    """Place a buy order."""
+    """买入 | Place a buy order."""
     if ths:
         from .broker.ths_broker import THSBroker
         b = THSBroker()
@@ -382,12 +382,12 @@ def broker_buy(
 
 @broker_app.command(name="sell")
 def broker_sell(
-    symbol: str = typer.Argument(..., help="6-digit stock code"),
-    price: float = typer.Argument(..., help="Trade price"),
-    volume: int = typer.Argument(..., help="Trade volume"),
-    ths: bool = typer.Option(False, "--ths", help="Use THS broker"),
+    symbol: str = typer.Argument(..., help="6位股票代码 | 6-digit stock code"),
+    price: float = typer.Argument(..., help="卖出价 | Trade price"),
+    volume: int = typer.Argument(..., help="卖出数量(股) | Trade volume"),
+    ths: bool = typer.Option(False, "--ths", help="使用同花顺 | Use THS broker"),
 ):
-    """Place a sell order."""
+    """卖出 | Place a sell order."""
     if ths:
         from .broker.ths_broker import THSBroker
         b = THSBroker()
@@ -409,10 +409,10 @@ def broker_sell(
 
 @broker_app.command(name="orders")
 def broker_orders(
-    symbol: Optional[str] = typer.Option(None, "--symbol", help="Filter by symbol"),
-    ths: bool = typer.Option(False, "--ths", help="Use THS broker"),
+    symbol: Optional[str] = typer.Option(None, "--symbol", help="筛选代码 | Filter by symbol"),
+    ths: bool = typer.Option(False, "--ths", help="使用同花顺 | Use THS broker"),
 ):
-    """List all orders."""
+    """查看所有委托 | List all orders."""
     if ths:
         from .broker.ths_broker import THSBroker
         b = THSBroker()
@@ -432,29 +432,30 @@ def broker_orders(
 
 @backtest_app.command(name="run")
 def backtest_run(
-    symbol: str = typer.Argument(..., help="6-digit stock code"),
-    strategy: str = typer.Option("ma_crossover", "--strategy", "-s", help="Strategy name"),
-    fast: int = typer.Option(5, "--fast", help="MA fast period (for ma_crossover)"),
-    slow: int = typer.Option(20, "--slow", help="MA slow period (for ma_crossover)"),
-    lookback: int = typer.Option(20, "--lookback", help="Lookback period (for breakout)"),
-    threshold: float = typer.Option(3.0, "--threshold", help="Breakout threshold pct"),
-    start_date: str = typer.Option("2024-01-01", "--start", help="Start date YYYY-MM-DD"),
-    end_date: str = typer.Option("2024-12-31", "--end", help="End date YYYY-MM-DD"),
-    cash: float = typer.Option(100_000, "--cash", help="Initial cash"),
-    commission: str = typer.Option("ashare", "--commission", "-c", help="Commission model: ashare, fixed"),
-    slippage: str = typer.Option("tick", "--slippage", help="Slippage model: tick, fixed, volume"),
-    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Benchmark codes: 000300,000905"),
-    save: Optional[str] = typer.Option(None, "--save", help="Save result to JSON file"),
-    data_file: Optional[str] = typer.Option(None, "--data", help="CSV file with OHLCV data"),
+    symbol: str = typer.Argument(..., help="6位股票代码 | 6-digit stock code"),
+    strategy: str = typer.Option("ma_crossover", "--strategy", "-s", help="策略名称 | Strategy name"),
+    fast: int = typer.Option(5, "--fast", help="MA短周期 | MA fast period (ma_crossover)"),
+    slow: int = typer.Option(20, "--slow", help="MA长周期 | MA slow period (ma_crossover)"),
+    lookback: int = typer.Option(20, "--lookback", help="回看天数 | Lookback period (breakout)"),
+    threshold: float = typer.Option(3.0, "--threshold", help="突破阈值(%) | Breakout threshold pct"),
+    start_date: str = typer.Option("2024-01-01", "--start", help="开始日期 | Start date YYYY-MM-DD"),
+    end_date: str = typer.Option("2024-12-31", "--end", help="结束日期 | End date YYYY-MM-DD"),
+    cash: float = typer.Option(100_000, "--cash", help="初始资金 | Initial cash"),
+    commission: str = typer.Option("ashare", "--commission", "-c", help="佣金模型(ashare/fixed) | Commission model"),
+    slippage: str = typer.Option("tick", "--slippage", help="滑点模型(tick/fixed/volume) | Slippage model"),
+    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="基准代码(如000300,000905) | Benchmark codes"),
+    save: Optional[str] = typer.Option(None, "--save", help="保存结果到JSON文件 | Save result to JSON"),
+    data_file: Optional[str] = typer.Option(None, "--data", help="CSV数据文件 | CSV file with OHLCV data"),
 ):
-    """Run a backtest for a single stock."""
+    """回测单个标的 | Run a backtest for a single stock."""
     from .backtest.engine import BacktestEngine
     from .backtest.models import get_commission_model, get_slippage_model
     from .backtest.strategy_registry import get as get_strategy, list_names
 
     strat_fn = get_strategy(strategy)
     if strat_fn is None:
-        print(f"Unknown strategy: {strategy}. Available: {', '.join(list_names())}")
+        console.print(f"[red]未知策略 / Unknown strategy: {strategy}[/red]")
+        console.print(f"可用策略 / Available: [green]{', '.join(list_names())}[/green]")
         raise typer.Exit(1)
 
     # Build params from CLI flags — merge with strategy defaults
@@ -517,17 +518,17 @@ def backtest_run(
 
 @backtest_app.command(name="compare")
 def backtest_compare(
-    symbol: str = typer.Argument(..., help="6-digit stock code"),
-    start_date: str = typer.Option("2024-01-01", "--start", help="Start date"),
-    end_date: str = typer.Option("2024-12-31", "--end", help="End date"),
-    cash: float = typer.Option(100_000, "--cash", help="Initial cash"),
-    commission: str = typer.Option("ashare", "--commission", "-c", help="Commission model: ashare, fixed"),
-    slippage: str = typer.Option("tick", "--slippage", help="Slippage model: tick, fixed, volume"),
-    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Benchmark codes: 000300,000905"),
-    data_file: Optional[str] = typer.Option(None, "--data", help="CSV file with OHLCV data"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    symbol: str = typer.Argument(..., help="6位股票代码 | 6-digit stock code"),
+    start_date: str = typer.Option("2024-01-01", "--start", help="开始日期 | Start date"),
+    end_date: str = typer.Option("2024-12-31", "--end", help="结束日期 | End date"),
+    cash: float = typer.Option(100_000, "--cash", help="初始资金 | Initial cash"),
+    commission: str = typer.Option("ashare", "--commission", "-c", help="佣金模型 | Commission model: ashare, fixed"),
+    slippage: str = typer.Option("tick", "--slippage", help="滑点模型 | Slippage model: tick, fixed, volume"),
+    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="基准代码 | Benchmark codes: 000300,000905"),
+    data_file: Optional[str] = typer.Option(None, "--data", help="CSV数据文件 | CSV file with OHLCV data"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """Compare multiple strategies on the same stock."""
+    """多策略对比 | Compare multiple strategies on the same stock."""
     from .backtest.engine import BacktestEngine
     from .backtest.models import get_commission_model, get_slippage_model
     from .backtest.strategy_registry import list_all
@@ -565,10 +566,10 @@ def backtest_compare(
             )
             results.append((name, r))
         except Exception as e:
-            print(f"  {name}: 跳过 ({e})")
+            console.print(f"  [yellow]{name}: 跳过 / Skipped ({e})[/yellow]")
 
     if not results:
-        print("所有策略都无法运行")
+        console.print("[red]所有策略都无法运行 | All strategies failed to run[/red]")
         raise typer.Exit(1)
 
     # Build rows for table display
@@ -595,7 +596,7 @@ def backtest_compare(
         _emit(rows)
     else:
         from .utils.cli_ui import backtest_result_table
-        console.print(backtest_result_table(rows, f"多策略对比 — {symbol}", show_benchmark=bool(bm_names)))
+        console.print(backtest_result_table(rows, f"多策略对比 / Strategy Compare — {symbol}", show_benchmark=bool(bm_names)))
 
     # Show benchmark comparison if enabled
     if benchmark and results and not json_out:
@@ -625,20 +626,21 @@ def backtest_compare(
 
 @backtest_app.command(name="batch")
 def backtest_batch(
-    symbols: list[str] = typer.Argument(..., help="Stock codes to backtest"),
-    strategy: str = typer.Option("ma_crossover", "--strategy", "-s", help="Strategy name"),
-    start_date: str = typer.Option("2024-01-01", "--start", help="Start date"),
-    end_date: str = typer.Option("2024-12-31", "--end", help="End date"),
-    cash: float = typer.Option(100_000, "--cash", help="Initial cash"),
-    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+    symbols: list[str] = typer.Argument(..., help="股票代码列表 | Stock codes to backtest"),
+    strategy: str = typer.Option("ma_crossover", "--strategy", "-s", help="策略名称 | Strategy name"),
+    start_date: str = typer.Option("2024-01-01", "--start", help="开始日期 | Start date"),
+    end_date: str = typer.Option("2024-12-31", "--end", help="结束日期 | End date"),
+    cash: float = typer.Option(100_000, "--cash", help="初始资金 | Initial cash"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
 ):
-    """Run backtest on multiple stocks with the same strategy."""
+    """批量回测 | Run backtest on multiple stocks with the same strategy."""
     from .backtest.engine import BacktestEngine
     from .backtest.strategy_registry import get as get_strategy, get_info, list_names
 
     strat_fn = get_strategy(strategy)
     if strat_fn is None:
-        print(f"Unknown strategy: {strategy}. Available: {', '.join(list_names())}")
+        console.print(f"[red]未知策略 / Unknown strategy: {strategy}[/red]")
+        console.print(f"可用策略 / Available: [green]{', '.join(list_names())}[/green]")
         raise typer.Exit(1)
 
     info = get_info(strategy)
@@ -675,7 +677,7 @@ def backtest_batch(
         from .utils.cli_ui import backtest_result_table
         valid = [r for r in rows if "error" not in r]
         if valid:
-            console.print(backtest_result_table(valid, f"批量回测 — {strategy}"))
+            console.print(backtest_result_table(valid, f"批量回测 / Batch — {strategy}"))
         failed = [r for r in rows if "error" in r]
         if failed:
             for f in failed:
