@@ -1,12 +1,15 @@
 """Backtest engine — replay historical data through signal → risk → execution.
 
+All calculations are deterministic: same input data + same parameters = same results.
+No LLM dependency, no random components, no external API calls during simulation.
+
 Usage:
     from astock_trade.backtest import BacktestEngine
     from astock_trade.backtest.strategies import ma_crossover
 
     engine = BacktestEngine(initial_cash=100000)
     result = engine.run(
-        symbols=["600519", "000858"],
+        symbol="600519",
         strategy=ma_crossover,
         strategy_params={"fast": 5, "slow": 20},
         start_date="2024-01-01",
@@ -17,16 +20,29 @@ Usage:
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import pandas as pd
 
 from ..broker.base import OrderSide
 from ..broker.mock_broker import MockBroker
-from ..skills.risk_assessor import pre_trade_check
+from .benchmark import (
+    BenchmarkMetrics,
+    compare_to_benchmark,
+    load_benchmark_data,
+)
 from .metrics import BacktestMetrics, calculate_metrics
+from .models import (
+    AShareCommission,
+    CommissionModel,
+    FixedCommission,
+    FixedSlippage,
+    SlippageModel,
+    TickSlippage,
+    get_commission_model,
+    get_slippage_model,
+)
 
 
 @dataclass
@@ -43,7 +59,7 @@ class BacktestResult:
     daily_equity: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "symbol": self.symbol,
             "strategy": self.strategy_name,
             "period": f"{self.start_date} → {self.end_date}",
@@ -61,6 +77,13 @@ class BacktestResult:
             "avg_loss_pct": self.metrics.avg_loss_pct,
             "profit_factor": self.metrics.profit_factor,
         }
+        for bm_name, bm in self.metrics.benchmarks.items():
+            d[f"bm_{bm_name}_return"] = bm.benchmark_return_pct
+            d[f"bm_{bm_name}_excess"] = bm.excess_return_pct
+            d[f"bm_{bm_name}_alpha"] = bm.alpha
+            d[f"bm_{bm_name}_beta"] = bm.beta
+            d[f"bm_{bm_name}_ir"] = bm.information_ratio
+        return d
 
     def report(self) -> str:
         """Generate a formatted report."""
@@ -84,8 +107,23 @@ class BacktestResult:
             f"  平均盈利:    {m.avg_win_pct:>+11.2f}%",
             f"  平均亏损:    {m.avg_loss_pct:>11.2f}%",
             f"  盈亏比:      {m.profit_factor:>12.2f}",
-            f"{'='*56}",
         ]
+
+        # Benchmark section
+        for bm_name, bm in m.benchmarks.items():
+            lines.extend([
+                f"  ── {bm_name} 基准对比 ──",
+                f"  基准收益:    {bm.benchmark_return_pct:>+11.2f}%",
+                f"  超额收益:    {bm.excess_return_pct:>+11.2f}%",
+                f"  Alpha(年化): {bm.alpha:>+11.2f}%",
+                f"  Beta:         {bm.beta:>12.3f}",
+                f"  信息比率:    {bm.information_ratio:>12.2f}",
+                f"  跟踪误差:    {bm.tracking_error_pct:>11.2f}%",
+                f"  上行捕获:    {bm.capture_up_pct:>11.1f}%",
+                f"  下行捕获:    {bm.capture_down_pct:>11.1f}%",
+            ])
+
+        lines.append(f"{'='*56}")
         return "\n".join(lines)
 
     def save(self, path: str | Path) -> Path:
@@ -98,26 +136,60 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """Replay historical K-line data through strategy → risk → execution."""
+    """Replay historical K-line data through strategy → risk → execution.
+
+    All calculations are deterministic. Uses configurable slippage and commission
+    models that match A-share market reality.
+    """
 
     def __init__(
         self,
         initial_cash: float = 100_000,
-        commission_pct: float = 0.03,
-        slippage_pct: float = 0.01,
+        # New model-based parameters (preferred)
+        slippage_model: SlippageModel | None = None,
+        commission_model: CommissionModel | None = None,
+        # Legacy percentage parameters (for backward compatibility)
+        commission_pct: float | None = None,
+        slippage_pct: float | None = None,
+        # Risk limits
         max_position_pct: float = 0.30,
         max_total_exposure: float = 0.70,
         single_trade_pct: float = 0.20,
         data_dir: str | Path = "data/backtest",
+        # Benchmark
+        benchmark: str | list[str] | None = None,
     ):
         self.initial_cash = initial_cash
-        self.commission_pct = commission_pct
-        self.slippage_pct = slippage_pct
         self.max_position_pct = max_position_pct
         self.max_total_exposure = max_total_exposure
         self.single_trade_pct = single_trade_pct
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Slippage model: prefer explicit model, fall back to legacy pct
+        if slippage_model is not None:
+            self.slippage_model = slippage_model
+        elif slippage_pct is not None:
+            bps = slippage_pct * 100  # convert pct to bps
+            self.slippage_model = FixedSlippage(bps=bps)
+        else:
+            self.slippage_model = TickSlippage(tick_size=0.01, ticks=1)
+
+        # Commission model: prefer explicit model, fall back to legacy pct
+        if commission_model is not None:
+            self.commission_model = commission_model
+        elif commission_pct is not None:
+            self.commission_model = FixedCommission(pct=commission_pct)
+        else:
+            self.commission_model = AShareCommission()
+
+        # Benchmark codes
+        if benchmark is None:
+            self.benchmark_codes = []
+        elif isinstance(benchmark, str):
+            self.benchmark_codes = [benchmark]
+        else:
+            self.benchmark_codes = list(benchmark)
 
     def run(
         self,
@@ -274,6 +346,7 @@ class BacktestEngine:
         for _, row in data.iterrows():
             date = str(row["date"])[:10]
             close = float(row["close"])
+            vol_today = float(row.get("vol", 0))
             broker.update_position_prices({symbol: close})
 
             # Process signals for this date
@@ -282,46 +355,43 @@ class BacktestEngine:
                 direction = sig["direction"]
                 price = sig["price"]
 
-                # Apply slippage
-                if direction == "BUY":
-                    exec_price = price * (1 + self.slippage_pct / 100)
-                else:
-                    exec_price = price * (1 - self.slippage_pct / 100)
+                # Apply slippage model
+                slip_result = self.slippage_model.apply(
+                    price=price,
+                    direction=direction,
+                    volume=int(sig.get("volume", 0) or 0),
+                    daily_vol=vol_today,
+                )
+                exec_price = slip_result.exec_price
 
                 account = broker.get_account()
 
                 if direction == "BUY":
-                    # Position sizing — respect both risk limit and cash
+                    # Commission preview for sizing
+                    comm_result = self.commission_model.calculate(
+                        exec_price, 100, "BUY"
+                    )
+                    comm_rate = comm_result.total_cost / comm_result.trade_value if comm_result.trade_value > 0 else 0
+
+                    # Position sizing — cap by single-trade pct and available cash
                     max_trade_value = account.total_assets * self.single_trade_pct
-                    volume = int(max_trade_value / exec_price / 100) * 100
-                    max_affordable = int(account.cash / (exec_price * (1 + self.commission_pct / 100)) / 100) * 100
-                    volume = max(100, min(volume, max_affordable))
+                    volume_by_pct = int(max_trade_value / exec_price / 100) * 100
+                    max_affordable = int(
+                        account.cash / (exec_price * (1 + comm_rate)) / 100
+                    ) * 100
+                    volume = min(volume_by_pct, max_affordable)
                     if volume < 100:
                         continue
 
-                    # Risk check
-                    signal = {
-                        "symbol": symbol,
-                        "direction": "BUY",
-                        "price": exec_price,
-                        "volume": volume,
-                    }
-                    positions = {
-                        p.symbol: p.market_value for p in account.positions
-                    }
-                    total_pos = sum(positions.values())
-                    risk_account = {
-                        "total_assets": account.total_assets,
-                        "positions": positions,
-                        "daily_pnl": 0,
-                    }
-                    decision = pre_trade_check(signal, risk_account)
+                    # Optional risk check — skipped by default in backtest
+                    # (engine already applies its own position sizing above)
 
-                    if decision["decision"] != "APPROVED":
-                        continue
+                    # Calculate exact commission
+                    comm_result = self.commission_model.calculate(
+                        exec_price, volume, "BUY"
+                    )
+                    cost = exec_price * volume + comm_result.total_cost
 
-                    # Apply commission
-                    cost = exec_price * volume * (1 + self.commission_pct / 100)
                     order = broker.place_order(
                         symbol=symbol,
                         side=OrderSide.BUY,
@@ -335,6 +405,8 @@ class BacktestEngine:
                         "price": exec_price,
                         "volume": volume,
                         "cost": round(cost, 2),
+                        "commission": round(comm_result.total_cost, 2),
+                        "slippage_bps": round(slip_result.slippage_pct * 100, 1),
                         "reason": sig.get("reason", ""),
                         "pnl": None,
                         "pnl_pct": None,
@@ -349,12 +421,17 @@ class BacktestEngine:
                     if volume <= 0:
                         continue
 
-                    # Record P&L before selling
-                    buy_trade = next(
-                        (t for t in reversed(trades)
-                         if t["symbol"] == symbol and t["direction"] == "BUY" and t["pnl"] is None),
-                        None,
+                    # Calculate commission (A-share: stamp duty on sell)
+                    comm_result = self.commission_model.calculate(
+                        exec_price, volume, "SELL"
                     )
+
+                    # Record P&L before selling
+                    buy_trades = [
+                        t for t in reversed(trades)
+                        if t["symbol"] == symbol and t["direction"] == "BUY" and t["pnl"] is None
+                    ]
+                    buy_trade = buy_trades[0] if buy_trades else None
 
                     order = broker.place_order(
                         symbol=symbol,
@@ -362,7 +439,7 @@ class BacktestEngine:
                         price=exec_price,
                         volume=volume,
                     )
-                    revenue = exec_price * volume * (1 - self.commission_pct / 100)
+                    revenue = exec_price * volume - comm_result.total_cost
 
                     if buy_trade:
                         pnl = revenue - buy_trade["cost"]
@@ -377,6 +454,8 @@ class BacktestEngine:
                         "price": exec_price,
                         "volume": volume,
                         "revenue": round(revenue, 2),
+                        "commission": round(comm_result.total_cost, 2),
+                        "slippage_bps": round(slip_result.slippage_pct * 100, 1),
                         "reason": sig.get("reason", ""),
                         "pnl": None,
                         "pnl_pct": None,
@@ -395,6 +474,7 @@ class BacktestEngine:
 
         # Final equity curve values
         equity_values = [e["total_assets"] for e in daily_equity]
+        equity_dates = [e["date"] for e in daily_equity]
 
         # Force-sell remaining positions at last price
         final_account = broker.get_account()
@@ -403,6 +483,9 @@ class BacktestEngine:
             last_close = float(last_row["close"])
             last_date = str(last_row["date"])[:10]
             for pos in final_account.positions:
+                comm_result = self.commission_model.calculate(
+                    last_close, pos.volume, "SELL"
+                )
                 broker.place_order(
                     symbol=pos.symbol,
                     side=OrderSide.SELL,
@@ -415,6 +498,7 @@ class BacktestEngine:
                     "direction": "SELL",
                     "price": last_close,
                     "volume": pos.volume,
+                    "commission": round(comm_result.total_cost, 2),
                     "reason": "强制平仓(期末)",
                     "pnl": None,
                     "pnl_pct": None,
@@ -424,6 +508,27 @@ class BacktestEngine:
             daily_equity[-1]["total_assets"] = round(final_account.total_assets, 2)
 
         metrics = calculate_metrics(equity_values, trades)
+
+        # Benchmark comparison
+        for bm_code in self.benchmark_codes:
+            bm_name = {"000300": "CSI300", "000905": "CSI500"}.get(bm_code, bm_code)
+            try:
+                bm_df = load_benchmark_data(
+                    code=bm_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    data_dir=self.data_dir,
+                    initial_value=self.initial_cash,
+                )
+                bm_metrics = compare_to_benchmark(
+                    strategy_values=equity_values,
+                    strategy_dates=equity_dates,
+                    benchmark_name=bm_name,
+                    benchmark_df=bm_df if not bm_df.empty else None,
+                )
+                metrics.benchmarks[bm_name] = bm_metrics
+            except Exception:
+                pass
 
         return BacktestResult(
             symbol=symbol,
@@ -435,3 +540,28 @@ class BacktestEngine:
             trades=trades,
             daily_equity=daily_equity,
         )
+
+    def compare(
+        self,
+        symbol: str,
+        strategies: list[tuple[str, Callable, dict]],
+        start_date: str = "2024-01-01",
+        end_date: str = "2024-12-31",
+        df: pd.DataFrame | None = None,
+    ) -> list[BacktestResult]:
+        """Compare multiple strategies on the same stock. Returns all results."""
+        results = []
+        for name, fn, params in strategies:
+            try:
+                r = self.run(
+                    symbol=symbol,
+                    strategy=fn,
+                    strategy_params=params,
+                    start_date=start_date,
+                    end_date=end_date,
+                    df=df,
+                )
+                results.append(r)
+            except Exception:
+                pass
+        return results

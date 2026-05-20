@@ -446,6 +446,8 @@ def backtest_run(
     benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="基准代码(如000300,000905) | Benchmark codes"),
     save: Optional[str] = typer.Option(None, "--save", help="保存结果到JSON文件 | Save result to JSON"),
     data_file: Optional[str] = typer.Option(None, "--data", help="CSV数据文件 | CSV file with OHLCV data"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出 | JSON output (machine-readable)"),
+    max_trade_pct: float = typer.Option(0.95, "--max-trade-pct", help="单笔交易上限 | Max trade pct of assets"),
 ):
     """回测单个标的 | Run a backtest for a single stock."""
     from .backtest.engine import BacktestEngine
@@ -474,6 +476,7 @@ def backtest_run(
         commission_model=get_commission_model(commission),
         slippage_model=get_slippage_model(slippage),
         benchmark=bm_codes,
+        single_trade_pct=max_trade_pct,
     )
 
     df = None

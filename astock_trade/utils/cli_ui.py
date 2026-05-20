@@ -101,8 +101,8 @@ def backtest_report_panel(
 ) -> Panel:
     """Rich Panel summarising a single backtest run."""
     lines = [
-        f"初始资金 / Initial:  {metrics.get('start_value', 0):>12,.0f}     "
-        f"最终净值 / Final:  {metrics.get('end_value', 0):>12,.0f}",
+        f"初始资金 / Initial:  {metrics.get('start_value', metrics.get('initial_cash', 0)):>12,.0f}     "
+        f"最终净值 / Final:  {metrics.get('end_value', metrics.get('final_value', 0)):>12,.0f}",
         "",
         f"  总收益率 / Return:   {_pct(metrics.get('total_return_pct', 0))}        "
         f"年化 / Annual:  {_pct(metrics.get('annual_return_pct', 0))}",
