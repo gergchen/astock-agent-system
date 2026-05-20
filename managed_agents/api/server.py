@@ -34,10 +34,11 @@ from managed_agents.sessions.session_manager import SessionManager
 from managed_agents.orchestra.coordinator import Coordinator
 from managed_agents.orchestra.bus import EventBus
 from managed_agents.deploy.tenants import get_tenant_manager
+from astock_trade.utils.logging_setup import setup_logging, get_logger
 from managed_agents.config import get_config
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("api_server")
+setup_logging()
+logger = get_logger("api_server")
 
 # ── 尝试导入 FastAPI ──
 try:
@@ -97,9 +98,23 @@ config, registry, session_mgr, tenant_mgr = init_app()
 # ── FastAPI App ──
 app = FastAPI(
     title="Managed Agents API",
-    description="A股多Agent量化交易 SaaS API",
+    description="A股多Agent量化交易 SaaS API — 哨兵盯盘 / 回测 / 多Agent编排 / 实时告警",
     version="0.2.0",
+    contact={"name": "Astock Agent System", "url": "https://github.com/gergchen/astock-agent-system"},
 )
+
+# CORS — allow all origins for development
+try:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+except Exception:
+    pass
 
 # ── WebSocket 连接池 ──
 ws_clients: list[WebSocket] = []
@@ -250,6 +265,44 @@ def health():
         "tenants": len(tenant_mgr.list_all()),
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ── 根路径 — 状态页 ──
+@app.get("/")
+def root():
+    return {
+        "service": "Managed Agents API",
+        "version": "0.2.0",
+        "status": "running",
+        "endpoints": {
+            "health": "GET /api/v1/health",
+            "tenants": "GET/POST /api/v1/tenants",
+            "agents": "GET /api/v1/agents",
+            "sessions": "POST /api/v1/sessions",
+            "session_detail": "GET /api/v1/sessions/{id}",
+            "session_history": "GET /api/v1/sessions/{id}/history",
+            "team_cycle": "POST /api/v1/team/cycle",
+            "ws_alerts": "WS /api/v1/ws/alerts",
+            "docs": "GET /docs",
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+# ── 统一异常处理 ──
+try:
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.error("Unhandled exception: %s", exc, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "type": type(exc).__name__},
+        )
+except Exception:
+    pass
 
 
 def main():

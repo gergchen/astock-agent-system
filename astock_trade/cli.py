@@ -17,6 +17,7 @@ import typer
 
 from . import __version__
 from .config import get_config
+from .utils.cli_ui import console
 
 app = typer.Typer(
     name="astock-trade",
@@ -35,7 +36,6 @@ app.add_typer(strategy_app, name="strategy")
 app.add_typer(watchlist_app, name="watchlist")
 app.add_typer(vault_app, name="vault")
 backtest_app = typer.Typer(help="Backtest — replay history through strategies")
-
 app.add_typer(broker_app, name="broker")
 app.add_typer(backtest_app, name="backtest")
 
@@ -50,9 +50,9 @@ def _emit(data, fmt: str = "json"):
             },
             "data": data,
         }
-        print(json.dumps(envelope, indent=2, ensure_ascii=False, default=str))
+        console.print_json(json.dumps(envelope, ensure_ascii=False, default=str))
     else:
-        print(data)
+        console.print(data)
 
 
 # ── Journal Commands ────────────────────────────────────────────
@@ -77,33 +77,50 @@ def journal_query(
     start_date: Optional[str] = typer.Option(None, "--start", help="Start date YYYY-MM-DD"),
     end_date: Optional[str] = typer.Option(None, "--end", help="End date YYYY-MM-DD"),
     symbol: Optional[str] = typer.Option(None, "--symbol", help="Filter by symbol"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
 ):
     """Query trade records in date range."""
     from .trade_journal import query_trades
     sd = date.fromisoformat(start_date) if start_date else date.today()
     ed = date.fromisoformat(end_date) if end_date else date.today()
     records = query_trades(sd, ed, symbol)
-    _emit(records)
+    if json_out:
+        _emit(records)
+    else:
+        from .utils.cli_ui import trade_journal_table
+        console.print(trade_journal_table(records))
 
 
 @journal_app.command(name="pnl")
 def journal_pnl(
     d: Optional[str] = typer.Option(None, "--date", "-d", help="Date YYYY-MM-DD"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
 ):
     """Compute daily P&L."""
     from .trade_journal import daily_pnl
     dt = date.fromisoformat(d) if d else date.today()
-    _emit(daily_pnl(dt))
+    result = daily_pnl(dt)
+    if json_out:
+        _emit(result)
+    else:
+        from .utils.cli_ui import pnl_summary_table
+        console.print(pnl_summary_table(result))
 
 
 @journal_app.command(name="summary")
 def journal_summary(
     start_date: str = typer.Option(..., "--start", help="Start date YYYY-MM-DD"),
     end_date: str = typer.Option(..., "--end", help="End date YYYY-MM-DD"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
 ):
     """Aggregated trade summary over a date range."""
     from .trade_journal import trade_summary
-    _emit(trade_summary(date.fromisoformat(start_date), date.fromisoformat(end_date)))
+    result = trade_summary(date.fromisoformat(start_date), date.fromisoformat(end_date))
+    if json_out:
+        _emit(result)
+    else:
+        from .utils.cli_ui import pnl_summary_table
+        console.print(pnl_summary_table(result))
 
 
 # ── Strategy Commands ───────────────────────────────────────────
@@ -175,10 +192,16 @@ def watchlist_get(
 @watchlist_app.command(name="list")
 def watchlist_list(
     user_id: str = typer.Option("default", "--user", "-u", help="User ID"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
 ):
     """List all watchlists for a user."""
     from .user_store import list_watchlists
-    _emit(list_watchlists(user_id))
+    data = list_watchlists(user_id)
+    if json_out:
+        _emit(data)
+    else:
+        from .utils.cli_ui import watchlist_table
+        console.print(watchlist_table(data))
 
 
 @watchlist_app.command(name="delete")
@@ -241,17 +264,22 @@ def vault_list():
 @app.command(name="version")
 def show_version():
     """Show version."""
-    print(f"astock-trade v{__version__}")
+    from .utils.cli_ui import console
+    console.print(f"[bold cyan]astock-trade[/bold cyan] [green]v{__version__}[/green]")
 
 
 @app.command(name="status")
-def status():
-    """Show system status — config, directories, vault info."""
+def status(
+    health: bool = typer.Option(False, "--health", "-H", help="Full health check across subsystems"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
+):
+    """Show system status — config, directories, vault info. Use -H for health check."""
     from .keyvault import list_services
     from .user_store import list_watchlists
     from .strategy_store import list_strategies
     cfg = get_config()
-    _emit({
+
+    data = {
         "version": __version__,
         "data_dir": str(cfg.data_dir),
         "vault_services": list_services(),
@@ -261,7 +289,41 @@ def status():
             "morning": f"{cfg.morning_open}-{cfg.morning_close}",
             "afternoon": f"{cfg.afternoon_open}-{cfg.afternoon_close}",
         },
-    })
+    }
+
+    if health:
+        from .monitor import check_all
+        h = check_all()
+        data["health"] = {
+            "overall": h.overall,
+            "uptime_h": round(h.uptime_sec / 3600, 2),
+            "memory_mb": round(h.memory_mb, 1),
+            "ok": h.ok_count,
+            "degraded": h.degraded_count,
+            "down": h.down_count,
+            "checked_at": h.checked_at,
+            "subsystems": [
+                {
+                    "name": s.name,
+                    "status": s.status,
+                    "detail": s.detail,
+                    "metrics": s.metrics,
+                }
+                for s in h.subsystems
+            ],
+        }
+        try:
+            from .utils.alerting import FileAlertChannel
+            ch = FileAlertChannel()
+            data["recent_alerts"] = ch.history(10)
+        except Exception:
+            pass
+
+    if json_out:
+        _emit(data)
+    else:
+        from .utils.cli_ui import status_dashboard
+        console.print(status_dashboard(data))
 
 
 # ── Broker Commands ──────────────────────────────────────────────
@@ -379,43 +441,39 @@ def backtest_run(
     start_date: str = typer.Option("2024-01-01", "--start", help="Start date YYYY-MM-DD"),
     end_date: str = typer.Option("2024-12-31", "--end", help="End date YYYY-MM-DD"),
     cash: float = typer.Option(100_000, "--cash", help="Initial cash"),
+    commission: str = typer.Option("ashare", "--commission", "-c", help="Commission model: ashare, fixed"),
+    slippage: str = typer.Option("tick", "--slippage", help="Slippage model: tick, fixed, volume"),
+    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Benchmark codes: 000300,000905"),
     save: Optional[str] = typer.Option(None, "--save", help="Save result to JSON file"),
     data_file: Optional[str] = typer.Option(None, "--data", help="CSV file with OHLCV data"),
 ):
     """Run a backtest for a single stock."""
     from .backtest.engine import BacktestEngine
-    from .backtest.strategies import (
-        ma_crossover, ma_crossover_volume, ma_crossover_trend,
-        triple_filter, price_breakout, buy_and_hold,
-    )
+    from .backtest.models import get_commission_model, get_slippage_model
+    from .backtest.strategy_registry import get as get_strategy, list_names
 
-    strategy_map = {
-        "ma_crossover": ma_crossover,
-        "ma_crossover_volume": ma_crossover_volume,
-        "ma_crossover_trend": ma_crossover_trend,
-        "triple_filter": triple_filter,
-        "price_breakout": price_breakout,
-        "buy_and_hold": buy_and_hold,
-    }
-
-    strat_fn = strategy_map.get(strategy)
+    strat_fn = get_strategy(strategy)
     if strat_fn is None:
-        print(f"Unknown strategy: {strategy}. Available: {', '.join(strategy_map)}")
+        print(f"Unknown strategy: {strategy}. Available: {', '.join(list_names())}")
         raise typer.Exit(1)
 
-    params = {}
-    if strategy == "ma_crossover":
-        params = {"fast": fast, "slow": slow}
-    elif strategy == "ma_crossover_volume":
-        params = {"fast": fast, "slow": slow, "vol_factor": 1.2}
-    elif strategy == "ma_crossover_trend":
-        params = {"fast": fast, "slow": slow, "trend": 60}
-    elif strategy == "triple_filter":
-        params = {"fast": fast, "slow": slow, "trend": 60, "rsi_period": 14, "rsi_buy_max": 70}
-    elif strategy == "price_breakout":
-        params = {"lookback": lookback, "threshold_pct": threshold}
+    # Build params from CLI flags — merge with strategy defaults
+    cli_overrides = {"fast": fast, "slow": slow, "lookback": lookback, "threshold_pct": threshold}
+    from .backtest.strategy_registry import get_info
+    info = get_info(strategy)
+    params = {**info["defaults"]} if info else {}
+    for k, v in cli_overrides.items():
+        if k in params:
+            params[k] = v
 
-    engine = BacktestEngine(initial_cash=cash)
+    bm_codes = benchmark.split(",") if benchmark else None
+
+    engine = BacktestEngine(
+        initial_cash=cash,
+        commission_model=get_commission_model(commission),
+        slippage_model=get_slippage_model(slippage),
+        benchmark=bm_codes,
+    )
 
     df = None
     if data_file:
@@ -432,14 +490,29 @@ def backtest_run(
             df=df,
         )
     except Exception as e:
-        print(f"回测失败: {e}")
+        console.print(f"[red]回测失败: {e}[/red]")
         raise typer.Exit(1)
 
-    print(result.report())
+    if json_out:
+        _emit(result.to_dict())
+    else:
+        from .utils.cli_ui import backtest_report_panel
+        metrics = result.to_dict()
+        benchmarks = {}
+        for k, v in metrics.items():
+            if k.startswith("bm_"):
+                parts = k.split("_", 2)
+                if len(parts) >= 3:
+                    bm_name = parts[1]
+                    field = parts[2]
+                    benchmarks.setdefault(bm_name, {})[field] = v
+        console.print(backtest_report_panel(
+            symbol, strategy, f"{start_date} → {end_date}", metrics, benchmarks or None,
+        ))
 
     if save:
         result.save(save)
-        print(f"\n结果已保存: {save}")
+        console.print(f"\n[green]结果已保存: {save}[/green]")
 
 
 @backtest_app.command(name="compare")
@@ -448,25 +521,31 @@ def backtest_compare(
     start_date: str = typer.Option("2024-01-01", "--start", help="Start date"),
     end_date: str = typer.Option("2024-12-31", "--end", help="End date"),
     cash: float = typer.Option(100_000, "--cash", help="Initial cash"),
+    commission: str = typer.Option("ashare", "--commission", "-c", help="Commission model: ashare, fixed"),
+    slippage: str = typer.Option("tick", "--slippage", help="Slippage model: tick, fixed, volume"),
+    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Benchmark codes: 000300,000905"),
     data_file: Optional[str] = typer.Option(None, "--data", help="CSV file with OHLCV data"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
 ):
     """Compare multiple strategies on the same stock."""
     from .backtest.engine import BacktestEngine
-    from .backtest.strategies import (
-        ma_crossover, ma_crossover_volume, ma_crossover_trend,
-        triple_filter, price_breakout, buy_and_hold,
-    )
+    from .backtest.models import get_commission_model, get_slippage_model
+    from .backtest.strategy_registry import list_all
 
+    all_strategies = list_all()
     strategies = [
-        ("MA5/20交叉", ma_crossover, {"fast": 5, "slow": 20}),
-        ("MA5/20+量确认", ma_crossover_volume, {"fast": 5, "slow": 20, "vol_factor": 1.2}),
-        ("MA5/20+趋势", ma_crossover_trend, {"fast": 5, "slow": 20, "trend": 60}),
-        ("三重过滤", triple_filter, {"fast": 5, "slow": 20, "trend": 60, "rsi_buy_max": 70}),
-        ("突破20日高点", price_breakout, {"lookback": 20, "threshold_pct": 3.0}),
-        ("买入持有(基准)", buy_and_hold, {}),
+        (info["description"], info["fn"], info["defaults"])
+        for info in all_strategies.values()
     ]
 
-    engine = BacktestEngine(initial_cash=cash)
+    bm_codes = benchmark.split(",") if benchmark else None
+
+    engine = BacktestEngine(
+        initial_cash=cash,
+        commission_model=get_commission_model(commission),
+        slippage_model=get_slippage_model(slippage),
+        benchmark=bm_codes,
+    )
 
     df = None
     if data_file:
@@ -492,15 +571,56 @@ def backtest_compare(
         print("所有策略都无法运行")
         raise typer.Exit(1)
 
-    print(f"{'策略':<18} {'总收益':>8} {'年化':>8} {'夏普':>6} {'回撤':>8} {'胜率':>7} {'交易':>5}")
-    print("-" * 70)
+    # Build rows for table display
+    rows = []
+    bm_names = set()
     for name, r in results:
         m = r.metrics
-        print(
-            f"{name:<18} {m.total_return_pct:>+7.2f}% {m.annual_return_pct:>+7.2f}% "
-            f"{m.sharpe_ratio:>6.2f} {m.max_drawdown_pct:>7.2f}% "
-            f"{m.win_rate_pct:>6.1f}% {m.total_trades:>5}"
-        )
+        row = {
+            "name": name,
+            "total_return_pct": m.total_return_pct,
+            "annual_return_pct": m.annual_return_pct,
+            "sharpe_ratio": m.sharpe_ratio,
+            "max_drawdown_pct": m.max_drawdown_pct,
+            "win_rate_pct": m.win_rate_pct,
+            "total_trades": m.total_trades,
+        }
+        for bm_name, bm in m.benchmarks.items():
+            row[f"alpha"] = bm.alpha
+            row[f"beta"] = bm.beta
+            bm_names.add(bm_name)
+        rows.append(row)
+
+    if json_out:
+        _emit(rows)
+    else:
+        from .utils.cli_ui import backtest_result_table
+        console.print(backtest_result_table(rows, f"多策略对比 — {symbol}", show_benchmark=bool(bm_names)))
+
+    # Show benchmark comparison if enabled
+    if benchmark and results and not json_out:
+        bm_name = {"000300": "CSI300", "000905": "CSI500"}.get(bm_codes[0] if bm_codes else "", "")
+        if bm_name and any(bm_name in r.metrics.benchmarks for _, r in results):
+            from rich.table import Table
+            bt = Table(title=f"{bm_name} 基准对比", border_style="cyan")
+            bt.add_column("策略", style="cyan")
+            bt.add_column("Alpha", justify="right")
+            bt.add_column("Beta", justify="right")
+            bt.add_column("信息比", justify="right")
+            bt.add_column("超额", justify="right")
+            bt.add_column("跟踪误差", justify="right")
+            for name, r in results:
+                bm = r.metrics.benchmarks.get(bm_name)
+                if bm:
+                    bt.add_row(
+                        name,
+                        f"{bm.alpha:+.2f}%",
+                        f"{bm.beta:.3f}",
+                        f"{bm.information_ratio:.2f}",
+                        f"{bm.excess_return_pct:+.2f}%",
+                        f"{bm.tracking_error_pct:.2f}%",
+                    )
+            console.print(bt)
 
 
 @backtest_app.command(name="batch")
@@ -510,43 +630,56 @@ def backtest_batch(
     start_date: str = typer.Option("2024-01-01", "--start", help="Start date"),
     end_date: str = typer.Option("2024-12-31", "--end", help="End date"),
     cash: float = typer.Option(100_000, "--cash", help="Initial cash"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON output (machine-readable)"),
 ):
     """Run backtest on multiple stocks with the same strategy."""
     from .backtest.engine import BacktestEngine
-    from .backtest.strategies import ma_crossover, price_breakout, buy_and_hold
+    from .backtest.strategy_registry import get as get_strategy, get_info, list_names
 
-    strategy_map = {
-        "ma_crossover": ma_crossover,
-        "price_breakout": price_breakout,
-        "buy_and_hold": buy_and_hold,
-    }
-    strat_fn = strategy_map.get(strategy)
+    strat_fn = get_strategy(strategy)
     if strat_fn is None:
-        print(f"Unknown strategy: {strategy}")
+        print(f"Unknown strategy: {strategy}. Available: {', '.join(list_names())}")
         raise typer.Exit(1)
+
+    info = get_info(strategy)
+    params = info["defaults"] if info else {}
 
     engine = BacktestEngine(initial_cash=cash)
 
-    print(f"{'代码':<8} {'总收益':>8} {'年化':>8} {'夏普':>6} {'回撤':>8} {'胜率':>7} {'交易':>5} {'盈亏比':>6}")
-    print("-" * 70)
-
+    rows = []
     for sym in symbols:
         try:
             r = engine.run(
                 symbol=sym,
                 strategy=strat_fn,
-                strategy_params={"fast": 5, "slow": 20} if strategy == "ma_crossover" else {},
+                strategy_params=params,
                 start_date=start_date,
                 end_date=end_date,
             )
             m = r.metrics
-            print(
-                f"{sym:<8} {m.total_return_pct:>+7.2f}% {m.annual_return_pct:>+7.2f}% "
-                f"{m.sharpe_ratio:>6.2f} {m.max_drawdown_pct:>7.2f}% "
-                f"{m.win_rate_pct:>6.1f}% {m.total_trades:>5} {m.profit_factor:>6.2f}"
-            )
+            rows.append({
+                "symbol": sym,
+                "total_return_pct": m.total_return_pct,
+                "annual_return_pct": m.annual_return_pct,
+                "sharpe_ratio": m.sharpe_ratio,
+                "max_drawdown_pct": m.max_drawdown_pct,
+                "win_rate_pct": m.win_rate_pct,
+                "total_trades": m.total_trades,
+            })
         except Exception as e:
-            print(f"{sym:<8} 失败: {e}")
+            rows.append({"symbol": sym, "error": str(e)})
+
+    if json_out:
+        _emit(rows)
+    else:
+        from .utils.cli_ui import backtest_result_table
+        valid = [r for r in rows if "error" not in r]
+        if valid:
+            console.print(backtest_result_table(valid, f"批量回测 — {strategy}"))
+        failed = [r for r in rows if "error" in r]
+        if failed:
+            for f in failed:
+                console.print(f"[red]✗[/red] {f['symbol']}: {f['error']}")
 
 
 if __name__ == "__main__":
