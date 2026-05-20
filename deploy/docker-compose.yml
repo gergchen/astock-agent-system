@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - CC_CONNECT_URL=${CC_CONNECT_URL:-}
+    volumes:
+      - managed_agents_data:/app/managed_agents_data
+      - trade_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # cc-connect bridge (WeChat/Feishu → Agent)
+  cc-connect:
+    image: ghcr.io/anthropics/cc-connect:latest
+    ports:
+      - "18630:18630"
+    volumes:
+      - cc_connect_config:/root/.cc-connect
+      - managed_agents_data:/app/managed_agents_data
+      - trade_data:/app/data
+    restart: unless-stopped
+    profiles:
+      - bridge
+
+  # Nginx reverse proxy (production)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  managed_agents_data:
+  trade_data:
+  cc_connect_config:

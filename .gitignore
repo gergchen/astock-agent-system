@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.cache/
+*.parquet
+.astock_data/
+.env
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.tmp
+
+# 外部参考项目（独立仓库）
+claude-source-analysis/
+china-financial-services/
+a-stock-data-tmp/
+
+# 运行时数据
+managed_agents_data/
+data/
+feishu_dump.txt
+.cc-connect/
+
+# 本地配置（不提交）
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/EE_SKILLS/
+
+# 运行时状态/缓存文件
+accum_*.json
+*_robot_storage.json
+*_robot.json
+*_storage.json
+candidates_accum.json
+chain_scan.json
+sector_stocks.json
+midday_review.json

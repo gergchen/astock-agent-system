@@ -1,0 +1,16 @@
+# A-Stock Data Toolkit — dependencies
+# Core
+mootdx>=0.10
+akshare>=1.18.0
+requests>=2.32.0
+pandas>=2.0.0
+
+# CLI
+typer>=0.15.0
+rich>=13.0.0
+
+# Feishu bot
+lark-oapi
+
+# Optional
+numpy>=1.26.0
