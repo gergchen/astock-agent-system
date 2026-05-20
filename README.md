@@ -1,97 +1,80 @@
-# a-stock-data
+# astock-agent-system
 
-A 股全栈数据工具包 — 6 层架构 · 15 个端点 · 7 个数据源
-
-一个结构化 Python 包，把分散在 7 个数据源里的 A 股原始数据整合成 CLI 工具集 + Claude Code Skill。
-
-> 上游灵感：[simonlin1212/a-stock-data](https://github.com/simonlin1212/a-stock-data) (Apache 2.0)
->
-> 本仓库：独立 Python 包 + CLI + 缓存 + 测试，非单文件嵌入模式
+A股多Agent智能投研系统 — 哨兵盯盘 + 飞书机器人 + 盘前/盘中/盘后全流程自动化。
 
 ## 架构
 
 ```
-A 股全栈数据 · 六层架构
-│
-├── 行情层    mootdx + 腾讯财经       K 线 + 五档盘口 + PE/PB/市值/换手率
-├── 信号层    同花顺热点 + 北向资金    当日强势股 + 题材归因 + 北向分钟流向
-├── 研报层    东财 + akshare + iwencai 研报列表 / PDF下载 / 一致预期 / NL搜索
-├── 新闻层    akshare × 3              个股新闻 / 财联社快讯 / 全球资讯
-├── 基础数据  mootdx finance / F10     37字段季报 + 9类公司资料
-└── 公告层    巨潮 cninfo + mootdx     沪深北京全量公告
+A股多Agent系统
+├── 哨兵 (Sentinel)        实时盯盘，交易时段异动秒级预警
+├── 研究员 (Researcher)     盘前扫描 / 盘中监控 / 信号生成
+├── 策略师 (Strategist)     盘后复盘 / 盘前简报
+├── 风控官 (Risk Officer)   交易前风控校验 / 仓位管理 / 回撤控制
+├── 交易员 (Day Trader)     订单执行 / 持仓追踪 / 交易日志
+├── 操盘手 (Portfolio Mgr)  仓位管理 / 组合优化 / 多策略协调
+└── 协调器 (Coordinator)   多Agent工作流编排
+
+数据层
+├── 行情层   mootdx + 腾讯财经        K线 / 盘口 / PE/PB/市值
+├── 信号层   同花顺热点 + 北向资金      强势股 / 题材归因 / 北向分钟流向
+├── 研报层   东财 + iwencai           研报列表 / 一致预期
+├── 新闻层   akshare + 财联社         个股新闻 / 快讯 / 国际资讯
+├── 基础数据  mootdx 财务/F10         季报 / 公司资料
+└── 公告层   巨潮资讯                  全量公告检索
 ```
 
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
+# 安装
 pip install -r requirements.txt
-
-# 2. 安装 CLI
 pip install -e .
 
-# 3. （可选）配置 API Keys
-export IWENCAI_API_KEY="your_key_here"
-export NEWSAPI_API_KEY="your_key_here"   # 国际新闻源，免费100次/天
+# 飞书全栈（bot + 哨兵 + 调度器）
+python -m managed_agents.main feishu
 
-# 4. 使用
-astock market valuation 600519
-astock signal hotspot
-astock workflow valuate 688017
+# 哨兵盯盘
+python -m managed_agents.main sentinel --interval 120
 ```
 
-### 作为 Claude Code Skill
+## Agent 决策链回测
 
 ```bash
-# 将 SKILL.md 放入 skills 目录
-mkdir -p ~/.claude/skills/a-stock-data
-cp .claude/skills/astock_data/SKILL.md ~/.claude/skills/a-stock-data/
+# 单日回测
+python -m managed_agents.main backtest run -d 2026-05-08 -p 688017 600519 300750
 
-# 启动 Claude Code，说"查一下 688017 的估值"即可自动激活
+# 批量回测
+python -m managed_agents.main backtest batch -s 2026-05-05 -e 2026-05-12 -m 2.0 -o report.json
+
+# 查看报告
+python -m managed_agents.main backtest report report.json
 ```
 
-## 使用示例
+回测链路：历史K线 → 热点推导 → 信号生成 → 风控过滤 → 前向收益验证 → 归因报告
+
+## 数据工具
 
 | 场景 | 命令 |
 |------|------|
-| 实时估值 | `astock market valuation 600519 000001` |
-| K线数据 | `astock market kline 000001 -c day -n 20` |
 | 今日热点 | `astock signal hotspot` |
-| 热点题材排名 | `astock signal hotspot --sectors` |
-| 北向资金 | `astock signal northbound --realtime` |
-| 研报列表 | `astock research reports 688017` |
-| 一致预期 | `astock research expectations 688017` |
-| 语义搜索 | `astock research search "人形机器人 丝杠"` |
-| 个股新闻 | `astock news stock 688017` |
-| 财联社快讯 | `astock news flash` |
-| 国际地缘新闻 | `astock news geopolitics "中东 伊朗"` |
-| 国际头条 | `astock news headlines` |
-| 基本面 | `astock fund basics 600519` |
-| 季报数据 | `astock fund finance 688017` |
-| 公司资料 | `astock fund f10 688017 -c "公司概况"` |
-| 公告列表 | `astock ann list 600519` |
-| 单票估值 | `astock workflow valuate 688017` |
-| 批量对比 | `astock workflow compare 688017 300308 300476` |
-| 主题研报 | `astock workflow thematic "人形机器人" "减速器"` |
+| 北向资金 | `astock signal northbound` |
+| 快讯 | `astock news flash -n 10` |
+| 实时估值 | `astock market valuation 600519` |
+| 研报 | `astock research reports 688017` |
+| 季报 | `astock fund finance 688017` |
+| 公告 | `astock ann list 600519` |
+| 策略回测 | `astock-trade backtest run 600519 --strategy ma_crossover` |
 
-## 估值框架
+## 定时任务
 
-- **前向PE** = 当前股价 / 一致预期EPS
-- **PEG** = 前向PE / (CAGR × 100)，PEG < 1 便宜
-- **PE消化** = 当前PE消化到30x锚定需要多少年
-- **30x锚点** = A 股成长股估值重力线
-
-## 数据源
-
-| 数据源 | 协议 | 封IP风险 | 状态 |
-|--------|------|---------|------|
-| mootdx | TCP (7709) | 极低 | 需直连 |
-| 腾讯财经 | HTTP | 低 | ✅ |
-| akshare | Python | 中 | ✅ |
-| iwencai | OpenAPI | 低 (需Key) | 可选 |
-| 同花顺热点 | HTTP | 极低 | ✅ |
-| 同花顺 hsgtApi | HTTP | 极低 | ✅ |
+| 时间 | 任务 |
+|------|------|
+| 09:02 | 盘前扫描（隔夜消息+外围+热点+北向） |
+| 09:37 | 盘中首扫 |
+| 13:05 | 下午扫描 |
+| 14:52 | 尾盘提醒 |
+| 15:10 | 盘后复盘 |
 
 ## License
 
-[Apache License 2.0](./LICENSE)
+Apache License 2.0

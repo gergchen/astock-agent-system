@@ -19,6 +19,12 @@ Session 管理:
     python -m managed_agents.main strategist review [--date]
     python -m managed_agents.main strategist briefing
 
+Agent 决策链回测:
+    python -m managed_agents.main backtest run --date 2026-05-15
+    python -m managed_agents.main backtest run --date 2026-05-15 --pool 600519 000858 300750
+    python -m managed_agents.main backtest batch --start 2026-05-10 --end 2026-05-15
+    python -m managed_agents.main backtest report <report.json>
+
 多Agent编排:
     python -m managed_agents.main coordinator run <workflow> [--input <data>]
 
@@ -47,6 +53,8 @@ from managed_agents.coordinator.coordinator import Coordinator
 from managed_agents.memory.memory_store import MemoryStore
 from managed_agents.utils.notifier import notify
 from managed_agents.config import get_config
+from managed_agents.backtest.engine import DecisionChainBacktester, BacktestConfig, DEFAULT_POOL
+from managed_agents.backtest.report import AttributionReport
 
 logging.basicConfig(
     level=logging.INFO,
@@ -467,6 +475,93 @@ def run_feishu_bot():
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
+def cmd_backtest(args):
+    """Agent 决策链回测."""
+    if args.action == "run":
+        bt_config = BacktestConfig(
+            target_date=args.date,
+            stock_pool=args.pool or DEFAULT_POOL,
+            momentum_threshold=args.momentum,
+        )
+        tester = DecisionChainBacktester(bt_config)
+        report = tester.run()
+        report.print()
+
+        if args.output:
+            report.save(args.output)
+            print(f"报告已保存: {args.output}")
+
+    elif args.action == "batch":
+        from datetime import timedelta
+        start = datetime.strptime(args.start, "%Y-%m-%d")
+        end = datetime.strptime(args.end, "%Y-%m-%d")
+        pool = args.pool or DEFAULT_POOL
+
+        all_reports = []
+        current = start
+        while current <= end:
+            # 跳过周末
+            if current.weekday() < 5:
+                date_str = current.strftime("%Y-%m-%d")
+                print(f"\n>>> 回测 {date_str} ...")
+                try:
+                    bt_config = BacktestConfig(
+                        target_date=date_str, stock_pool=pool,
+                        momentum_threshold=args.momentum,
+                    )
+                    tester = DecisionChainBacktester(bt_config)
+                    report = tester.run()
+                    all_reports.append(report)
+                except Exception as e:
+                    print(f"  {date_str} 失败: {e}")
+            current += timedelta(days=1)
+
+        # 汇总
+        if all_reports:
+            win_rates = [r.summary.get("win_rate", 0) for r in all_reports]
+            avg_corr = sum(r.summary.get("confidence_return_correlation", 0) for r in all_reports) / len(all_reports)
+            print(f"\n{'='*60}")
+            print(f"  批量回测汇总 ({len(all_reports)} 个交易日)")
+            print(f"  平均胜率: {sum(win_rates)/len(win_rates):.1%}")
+            print(f"  平均置信度相关性: {avg_corr:.3f}")
+            print(f"{'='*60}")
+
+            if args.output:
+                combined = {
+                    "period": f"{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}",
+                    "days": len(all_reports),
+                    "avg_win_rate": round(sum(win_rates) / len(win_rates), 3),
+                    "avg_correlation": round(avg_corr, 3),
+                    "reports": [r.to_dict() for r in all_reports],
+                }
+                import json
+                Path(args.output).write_text(
+                    json.dumps(combined, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+                print(f"汇总已保存: {args.output}")
+
+    elif args.action == "report":
+        report = AttributionReport(target_date="")
+        # 从 JSON 加载并打印
+        import json
+        data = json.loads(Path(args.report).read_text(encoding="utf-8"))
+        report.summary = data.get("summary", {})
+        report.attributions = [
+            SignalAttribution(
+                symbol=a["symbol"],
+                signal=a["signal"],
+                forward_returns=a["forward_returns"],
+                verdict=a["verdict"],
+            ) for a in data.get("attributions", [])
+        ]
+        report.target_date = data.get("target_date", "")
+        report.elapsed_ms = data.get("elapsed_ms", 0)
+        report.steps = {}
+        for name, step in data.get("chain", {}).items():
+            report.steps[name] = ChainStepResult(**step)
+        report.print()
+
 def main():
     parser = argparse.ArgumentParser(description="Managed Agents for A-Stock")
     sub = parser.add_subparsers(dest="command")
@@ -492,6 +587,23 @@ def main():
 
     # --- coordinator ---
     coord_parser = sub.add_parser("coordinator", help="多Agent编排")
+
+    # --- backtest ---
+    backtest_parser = sub.add_parser("backtest", help="Agent决策链回测")
+    backtest_sub = backtest_parser.add_subparsers(dest="action")
+    bt_run = backtest_sub.add_parser("run", help="单日回测")
+    bt_run.add_argument("--date", "-d", required=True, help="目标日期 YYYY-MM-DD")
+    bt_run.add_argument("--pool", "-p", nargs="*", help="股票池")
+    bt_run.add_argument("--momentum", "-m", type=float, default=3.0, help="动量阈值%% (默认3%%)")
+    bt_run.add_argument("--output", "-o", help="输出 JSON 路径")
+    bt_batch = backtest_sub.add_parser("batch", help="批量回测")
+    bt_batch.add_argument("--start", "-s", required=True, help="起始日期 YYYY-MM-DD")
+    bt_batch.add_argument("--end", "-e", required=True, help="结束日期 YYYY-MM-DD")
+    bt_batch.add_argument("--pool", "-p", nargs="*", help="股票池")
+    bt_batch.add_argument("--momentum", "-m", type=float, default=3.0, help="动量阈值%% (默认3%%)")
+    bt_batch.add_argument("--output", "-o", help="汇总输出 JSON 路径")
+    bt_report = backtest_sub.add_parser("report", help="查看回测报告")
+    bt_report.add_argument("report", help="报告 JSON 文件路径")
     coord_sub = coord_parser.add_subparsers(dest="action")
     coord_run = coord_sub.add_parser("run", help="运行工作流")
     coord_run.add_argument("workflow", help="工作流名称 (morning_briefing/intraday_alert/daily_review/stock_deep_dive)")
@@ -546,6 +658,9 @@ def main():
 
     elif args.command == "coordinator":
         cmd_coordinator(args)
+
+    elif args.command == "backtest":
+        cmd_backtest(args)
 
     elif args.command == "memory":
         cmd_memory(args)
