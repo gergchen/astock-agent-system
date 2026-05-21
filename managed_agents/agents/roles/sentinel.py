@@ -1,13 +1,10 @@
 """哨兵 Sentinel — 实时盯盘，异动秒级预警.
 
 职责:
-- 交易时段内每 N 秒扫描一次市场（热点变化、北向资金、快讯）
+- 交易时段内每 N 秒扫描一次市场（大盘指数、北向资金、快讯）
 - 检测到异动立即推送预警到微信
-- 盘后自动静默，不发送任何消息
-
-触发条件:
-- 题材排名大幅变化（新题材进入TOP3 或 昨日TOP3消失），5分钟内不重复
-- 北向资金5分钟内大幅流入/流出
+- 大盘砸盘（最高优先级，不受冷却限制）
+- 北向资金大幅流入/流出
 - 财联社突发重大快讯（仅保留真正突发事件）
 """
 
@@ -17,36 +14,41 @@ from datetime import datetime
 
 from ..base import BaseAgent
 from ...skills.market_skills import MarketSkills
-from ...sessions.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
 SENTINEL_PROMPT = """你是一个A股市场哨兵，负责实时盯盘和异动预警。
 
 ## 你的职责
-1. 每120秒扫描一次市场数据（热点、北向资金、快讯）
+1. 每120秒扫描一次市场数据（大盘指数、北向资金、快讯）
 2. 发现异动立即生成简洁预警报告（≤200字）
 3. 判断异动严重程度：🟢普通 🟡关注 🔴紧急
 
-## 输出格式
-```
-[时间] [严重程度] 异动标题
-- 关键数据
-- 建议关注方向
-```
-
 ## 注意
-- 只报告异常变化，不重复已知信息
-- 优先报告北向资金方向变化和题材突变
+- 大盘砸盘预警优先于一切
 - 语言简洁，直接给结论
 """
 
 # 快讯关键词 — 只保留真正的突发事件
 BREAKING_KW = ["突发", "紧急", "暴涨", "暴跌", "熔断", "停牌", "黑天鹅", "债务违约"]
 
+# 大盘指数监控配置
+MONITORED_INDICES = ["000001", "399001", "399006", "000688", "000300"]
+INDEX_NAMES = {
+    "000001": "上证指数", "399001": "深证成指",
+    "399006": "创业板指", "000688": "科创50",
+    "000300": "沪深300",
+}
+# 跌幅阈值： (阈值%, 告警级别)
+INDEX_THRESHOLDS = [
+    (3.0, "紧急"),   # 跌超 3% → 紧急
+    (2.0, "关注"),   # 跌超 2% → 关注
+    (1.5, "关注"),   # 跌超 1.5% → 关注（仅上证）
+]
+
 # 冷却时间（秒）
-HOTSPOT_COOLDOWN = 600    # 热点 TOP3 变化：10分钟内不重复
-GLOBAL_COOLDOWN = 300     # 全局告警：5分钟内最多发一批
+GLOBAL_COOLDOWN = 300     # 普通告警：5分钟内最多发一批
+INDEX_COOLDOWN = 600      # 大盘告警：10分钟内不重复
 
 
 class Sentinel(BaseAgent):
@@ -54,15 +56,13 @@ class Sentinel(BaseAgent):
 
     def __init__(self):
         self.skills_api = MarketSkills()
-        self._store = SessionStore()
         super().__init__(name="sentinel", role="哨兵")
-        self._last_hotspots: dict | None = None
         self._last_northbound: float | None = None
-        self._alerted_burst: set = set()
         self._alerted_news: set = set()
         self._alerted_nb_direction: str = ""
-        self._last_alert_time: float = 0            # 上次告警时间戳
-        self._hotspot_cooldowns: dict[str, float] = {}  # 题材名 -> 上次告警时间
+        self._last_alert_time: float = 0            # 上次普通告警时间戳
+        self._index_alert_level: dict[str, str] = {}    # 指数 -> 已告警的最高级别
+        self._last_index_alert_time: float = 0          # 上次指数告警时间戳
 
     @staticmethod
     def _is_trading_time() -> bool:
@@ -78,9 +78,9 @@ class Sentinel(BaseAgent):
 
     def _register_skills(self):
         self._skills.update({
-            "get_hotspots": self.skills_api.get_sector_hotspots,
             "get_northbound": self.skills_api.get_northbound,
             "get_flash_news": self.skills_api.get_flash_news,
+            "get_index_quotes": self.skills_api.get_index_quotes,
         })
 
     def scan(self) -> dict:
@@ -90,24 +90,24 @@ class Sentinel(BaseAgent):
         if not self._is_trading_time():
             return {"time": now, "alerts": [], "hotspot_top3": [], "northbound": {}}
 
-        alerts = []
+        priority_alerts = []  # 大盘异动 — 必推，不受冷却限制
+        normal_alerts = []    # 其他告警
         current_hour = datetime.now().hour
         now_min = datetime.now().minute
         is_market_open = (current_hour == 9 and now_min >= 30) or (10 <= current_hour < 15)
 
-        # 1. 扫描题材热点
+        # 1. 扫描大盘指数（最高优先级 — 砸盘必须推送）
         if is_market_open:
             try:
-                hotspots = self.skills_api.get_sector_hotspots()
-                alerts += self._check_hotspot_changes(hotspots)
-                self._last_hotspots = hotspots
+                index_data = self.skills_api.get_index_quotes(MONITORED_INDICES)
+                priority_alerts += self._check_market_index(index_data)
             except Exception as e:
-                logger.error(f"热点扫描失败: {e}")
+                logger.error(f"指数扫描失败: {e}")
 
-            # 2. 扫描北向资金
+            # 2. 扫描北向资金（比热点重要）
             try:
                 nb = self.skills_api.get_northbound()
-                alerts += self._check_northbound_alert(nb)
+                normal_alerts += self._check_northbound_alert(nb)
                 self._last_northbound = nb.get("total", 0)
             except Exception as e:
                 logger.error(f"北向扫描失败: {e}")
@@ -115,73 +115,71 @@ class Sentinel(BaseAgent):
         # 3. 扫描快讯
         try:
             news = self.skills_api.get_flash_news(limit=5)
-            alerts += self._check_breaking_news(news)
+            normal_alerts += self._check_breaking_news(news)
         except Exception as e:
             logger.error(f"快讯扫描失败: {e}")
 
-        # 全局冷却：距上次告警不足2分钟，丢弃所有告警
+        # 全局冷却：只有普通告警受冷却限制，大盘异动不受限
         now_ts = time.time()
-        if alerts and self._last_alert_time > 0:
+        if normal_alerts and self._last_alert_time > 0:
             if now_ts - self._last_alert_time < GLOBAL_COOLDOWN:
-                alerts = []
-        if alerts:
+                normal_alerts = []
+        if normal_alerts:
             self._last_alert_time = now_ts
+
+        alerts = priority_alerts + normal_alerts
 
         return {
             "time": now,
             "alerts": alerts,
-            "hotspot_top3": self._extract_top3(hotspots if 'hotspots' in dir() else None),
+            "hotspot_top3": [],
             "northbound": nb if 'nb' in dir() else {},
         }
 
-    def _check_hotspot_changes(self, current: dict) -> list[dict]:
+    def _check_market_index(self, index_data: dict) -> list[dict]:
+        """检查大盘指数跌幅，达到阈值时告警。同一指数同一级别不重复告警。"""
         alerts = []
-        sectors = current.get("sectors", [])
-        if not sectors:
-            return alerts
-
-        top3_now = {s["name"] for s in sectors[:3]}
         now_ts = time.time()
 
-        if self._last_hotspots:
-            top3_before = {s["name"] for s in self._last_hotspots.get("sectors", [])[:3]}
-            new_in = top3_now - top3_before
-            dropped = top3_before - top3_now
+        # 距上次指数告警不足冷却期，跳过
+        if now_ts - self._last_index_alert_time < INDEX_COOLDOWN:
+            return alerts
 
-            # 过滤冷却期内的题材
-            new_in = {n for n in new_in
-                      if self._hotspot_cooldowns.get(n, 0) + HOTSPOT_COOLDOWN < now_ts}
-            dropped = {d for d in dropped
-                       if self._hotspot_cooldowns.get(d, 0) + HOTSPOT_COOLDOWN < now_ts}
+        for code, data in index_data.items():
+            name = INDEX_NAMES.get(code, data.get("name", code))
+            change_pct = data.get("change_pct", 0)
 
-            now_ts = time.time()
+            if change_pct >= 0:
+                continue  # 上涨或平盘不告警
 
-            # 合并进入+退出为一条消息，减少刷屏
-            parts = []
-            if new_in:
-                for name in new_in:
-                    self._hotspot_cooldowns[name] = now_ts
-                parts.append(f"↑{', '.join(new_in)}")
-            if dropped:
-                for name in dropped:
-                    self._hotspot_cooldowns[name] = now_ts
-                parts.append(f"↓{', '.join(dropped)}")
-            if parts:
-                alerts.append({
-                    "level": "关注",
-                    "title": f"TOP3轮动: {' '.join(parts)}",
-                    "detail": f"当前TOP3: {', '.join(top3_now)}",
-                })
+            abs_drop = abs(change_pct)
 
-        # 题材数量暴增 — 去重：同一题材只告警一次
-        top1 = sectors[0]
-        if top1["count"] >= 10 and top1["name"] not in self._alerted_burst:
-            self._alerted_burst.add(top1["name"])
+            # 确定当前应告警的级别
+            current_level = None
+            if abs_drop >= 3.0:
+                current_level = "紧急"
+            elif abs_drop >= 2.0:
+                current_level = "关注"
+            elif abs_drop >= 1.5 and code == "000001":
+                current_level = "关注"
+            else:
+                continue  # 跌幅不足阈值
+
+            # 同一指数已经告警过同等或更高级别，不再重复
+            prev_level = self._index_alert_level.get(code, "")
+            level_rank = {"紧急": 3, "关注": 2, "普通": 1}
+            if prev_level and level_rank.get(current_level, 0) <= level_rank.get(prev_level, 0):
+                continue
+
+            self._index_alert_level[code] = current_level
             alerts.append({
-                "level": "紧急",
-                "title": f"题材集中爆发: {top1['name']} ({top1['count']}家涨停)",
-                "detail": "板块效应极强，关注持续性",
+                "level": current_level,
+                "title": f"{'🔴' if current_level == '紧急' else '🟡'} 大盘跳水: {name} {change_pct:.1f}%",
+                "detail": f"当前 {data['price']:.0f}  昨收 {data['last_close']:.0f}  日内 {data['low']:.0f}~{data['high']:.0f}",
             })
+
+        if alerts:
+            self._last_index_alert_time = now_ts
 
         return alerts
 
@@ -235,8 +233,3 @@ class Sentinel(BaseAgent):
                     })
                     break
         return alerts
-
-    def _extract_top3(self, hotspots) -> list[str]:
-        if hotspots is None:
-            return []
-        return [s["name"] for s in hotspots.get("sectors", [])[:3]]

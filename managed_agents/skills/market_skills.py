@@ -83,3 +83,30 @@ class MarketSkills:
         if df.empty:
             return {"quotes": []}
         return {"quotes": df.to_dict(orient="records")}
+
+    def get_index_quotes(self, codes: list[str] | None = None) -> dict:
+        """获取主要指数实时行情.
+
+        Args:
+            codes: 指数代码列表，默认监控五大核心指数.
+
+        Returns:
+            代码 -> {name, price, change_pct, change_amt, ...}
+        """
+        from astock_data.market.tencent_finance import get_valuation
+        if codes is None:
+            codes = ["000001", "399001", "399006", "000688", "000300"]
+        raw = get_valuation(codes)
+        return {
+            code: {
+                "name": q["name"],
+                "price": q["price"],
+                "change_pct": q["change_pct"],
+                "change_amt": q["change_amt"],
+                "last_close": q["last_close"],
+                "high": q["high"],
+                "low": q["low"],
+            }
+            for code, q in raw.items()
+            if q["price"] > 0
+        }

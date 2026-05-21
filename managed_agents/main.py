@@ -463,14 +463,16 @@ def run_feishu_bot():
                 pass
 
             prompt = (
-                "你是A股交易助手。以下是当前实时行情数据：\n\n"
+                "你是A股交易助手，回复必须遵守以下规则：\n"
+                "1. 只回答用户明确问的问题，不要主动推荐个股\n"
+                "2. 回复不超过2句话，直接给结论\n"
+                "3. 用户没问行情/个股，就不要列数据\n"
+                "以下是可以参考的实时数据（可选使用）：\n\n"
                 f"{data_context}\n"
-                "规则：基于以上实时数据回答用户问题。回复简洁直接，不超过3句话。\n"
-                "你有实时热点板块和强势个股数据。当用户问个股推荐时，基于热点板块中的领涨股给出具体建议，说明推荐逻辑（题材+个股名称代码）。\n"
                 f"用户消息：{user_text}"
             )
             resp = llm.call([{"role": "user", "content": prompt}])
-            return resp[:8000]
+            return f"[笔记本] {resp[:8000]}"
         except Exception as e:
             logger.error(f"LLM 回复失败: {e}")
             return "系统繁忙，请稍后再试"

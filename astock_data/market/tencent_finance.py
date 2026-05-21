@@ -19,9 +19,23 @@ from ..utils.retry import retry
 from ..exceptions import TencentFinanceError
 
 
+# 指数代码 → 腾讯前缀映射（get_market_prefix 默认规则对指数无效）
+INDEX_PREFIX_MAP: dict[str, str] = {
+    "000001": "sh",  # 上证指数
+    "000688": "sh",  # 科创50
+    "000300": "sh",  # 沪深300
+    "000016": "sh",  # 上证50
+    "000905": "sh",  # 中证500
+    "399001": "sz",  # 深证成指
+    "399006": "sz",  # 创业板指
+}
+
+
 def get_market_prefix(code: str) -> str:
     """6-digit code -> Tencent market prefix (sh/sz/bj)."""
     code = str(code).zfill(6)
+    if code in INDEX_PREFIX_MAP:
+        return INDEX_PREFIX_MAP[code]
     if code.startswith(("6", "9")):
         return "sh"
     elif code.startswith("8"):
