@@ -25,7 +25,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from ..broker.base import OrderSide
+from ..broker.base import OrderSide, OrderStatus
 from ..broker.mock_broker import MockBroker
 from .benchmark import (
     BenchmarkMetrics,
@@ -162,7 +162,7 @@ class BacktestEngine:
         self.initial_cash = initial_cash
         self.max_position_pct = max_position_pct
         self.max_total_exposure = max_total_exposure
-        self.single_trade_pct = single_trade_pct
+        self.single_trade_pct = single_trade_pct  # 单笔占比上限, 高股价时按最小一手处理
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -289,6 +289,25 @@ class BacktestEngine:
             f"无法获取 {symbol} 的历史数据。请检查网络或手动放入 {cache_file}"
         )
 
+    @staticmethod
+    def _clamp_price(price: float, ref_price: float, limit_pct: float = 0.10) -> float:
+        """Clamp execution price within daily limit-up / limit-down bounds."""
+        lower = round(ref_price * (1 - limit_pct), 2)
+        upper = round(ref_price * (1 + limit_pct), 2)
+        return max(lower, min(price, upper))
+
+    @staticmethod
+    def _is_suspension(row: pd.Series) -> bool:
+        """Detect trading suspension: flat OHLC + zero volume."""
+        vol = float(row.get("vol", 0) or 0)
+        if vol > 0:
+            return False
+        o = float(row.get("open", 0) or 0)
+        h = float(row.get("high", 0) or 0)
+        l_val = float(row.get("low", 0) or 0)
+        c = float(row.get("close", 0) or 0)
+        return o == h == l_val == c and o > 0
+
     def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Ensure standard column names: date, open, high, low, close, vol."""
         aliases = {
@@ -347,6 +366,12 @@ class BacktestEngine:
             date = str(row["date"])[:10]
             close = float(row["close"])
             vol_today = float(row.get("vol", 0))
+
+            # Skip suspension days (flat OHLC + zero volume)
+            if self._is_suspension(row):
+                continue
+
+            broker.set_current_date(date)
             broker.update_position_prices({symbol: close})
 
             # Process signals for this date
@@ -364,6 +389,9 @@ class BacktestEngine:
                 )
                 exec_price = slip_result.exec_price
 
+                # Clamp to daily limit-up / limit-down bounds
+                exec_price = self._clamp_price(exec_price, close)
+
                 account = broker.get_account()
 
                 if direction == "BUY":
@@ -373,13 +401,23 @@ class BacktestEngine:
                     )
                     comm_rate = comm_result.total_cost / comm_result.trade_value if comm_result.trade_value > 0 else 0
 
-                    # Position sizing — cap by single-trade pct and available cash
+                    # Position sizing
+                    one_lot_cost = int(exec_price * 100 * (1 + comm_rate))
+                    max_affordable = int(account.cash / one_lot_cost) * 100
+
+                    # Single-trade percentage cap
                     max_trade_value = account.total_assets * self.single_trade_pct
                     volume_by_pct = int(max_trade_value / exec_price / 100) * 100
-                    max_affordable = int(
-                        account.cash / (exec_price * (1 + comm_rate)) / 100
-                    ) * 100
-                    volume = min(volume_by_pct, max_affordable)
+
+                    # Use percentage cap if it allows at least 1 lot,
+                    # otherwise allow 1 lot if cash can afford it
+                    if volume_by_pct >= 100:
+                        volume = min(volume_by_pct, max_affordable)
+                    elif max_affordable >= 100:
+                        volume = min(100, max_affordable)
+                    else:
+                        volume = 0
+
                     if volume < 100:
                         continue
 
@@ -439,6 +477,9 @@ class BacktestEngine:
                         price=exec_price,
                         volume=volume,
                     )
+                    # Skip if T+1 rejected (same-day sell)
+                    if order.status == OrderStatus.REJECTED:
+                        continue
                     revenue = exec_price * volume - comm_result.total_cost
 
                     if buy_trade:
@@ -486,18 +527,34 @@ class BacktestEngine:
                 comm_result = self.commission_model.calculate(
                     last_close, pos.volume, "SELL"
                 )
+                revenue = last_close * pos.volume - comm_result.total_cost
+
                 broker.place_order(
                     symbol=pos.symbol,
                     side=OrderSide.SELL,
                     price=last_close,
                     volume=pos.volume,
                 )
+
+                # Find matching buy trade and record PnL
+                buy_trades = [
+                    t for t in reversed(trades)
+                    if t["symbol"] == pos.symbol and t["direction"] == "BUY" and t["pnl"] is None
+                ]
+                if buy_trades:
+                    buy_trade = buy_trades[0]
+                    pnl = revenue - buy_trade["cost"]
+                    pnl_pct = (pnl / buy_trade["cost"]) * 100
+                    buy_trade["pnl"] = round(pnl, 2)
+                    buy_trade["pnl_pct"] = round(pnl_pct, 2)
+
                 trades.append({
                     "date": last_date,
                     "symbol": pos.symbol,
                     "direction": "SELL",
                     "price": last_close,
                     "volume": pos.volume,
+                    "revenue": round(revenue, 2),
                     "commission": round(comm_result.total_cost, 2),
                     "reason": "强制平仓(期末)",
                     "pnl": None,

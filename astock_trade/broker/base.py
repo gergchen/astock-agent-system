@@ -37,6 +37,7 @@ class Order:
     filled_volume: int = 0
     filled_price: float = 0.0
     created_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
 
 
 @dataclass

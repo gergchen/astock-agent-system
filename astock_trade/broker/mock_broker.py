@@ -18,6 +18,13 @@ class MockBroker(BrokerBase):
         self._positions: dict[str, Position] = {}
         self._orders: dict[str, Order] = {}
         self._connected = False
+        # T+1 settlement: tracks the latest buy date per symbol
+        self._settle_date: dict[str, str] = {}
+        self._current_date: str = ""
+
+    def set_current_date(self, date_str: str) -> None:
+        """Set the current trading date (used for T+1 enforcement)."""
+        self._current_date = date_str
 
     def connect(self) -> bool:
         self._connected = True
@@ -59,6 +66,7 @@ class MockBroker(BrokerBase):
         amount = price * volume
         if side == OrderSide.BUY:
             self._cash -= amount
+            self._settle_date[symbol] = self._current_date
             if symbol in self._positions:
                 pos = self._positions[symbol]
                 total_volume = pos.volume + volume
@@ -71,6 +79,12 @@ class MockBroker(BrokerBase):
                     current_price=price, market_value=amount, pnl=0.0, pnl_pct=0.0,
                 )
         else:
+            # T+1: reject sell if shares were bought today (only when date is explicitly set)
+            if self._current_date and self._settle_date.get(symbol) == self._current_date:
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = "T+1: 当日买入不可卖出"
+                self._orders[order_id] = order
+                return order
             self._cash += amount
             if symbol in self._positions:
                 pos = self._positions[symbol]
