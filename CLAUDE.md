@@ -53,15 +53,11 @@ python -m managed_agents.main sentinel --interval 60
 | 时间 | 任务 | 说明 |
 |------|------|------|
 | 09:02 | /morning-scan | 盘前扫描（cc-connect 09:00启动后） |
-| 09:37 | /market-monitor | 盘中首扫 |
-| 13:05 | /market-monitor | 下午扫描 |
-| 14:52 | /market-monitor | 尾盘提醒 |
 | 15:10 | /postmarket-recap | 盘后复盘 |
 
 ## 哨兵模式
 
-实盘盯盘需要手动启动哨兵进程（建议在 cc-connect 启动后执行）：
+哨兵在笔记本上独立运行，不在本机启动。
 ```bash
-python -m managed_agents.main sentinel --interval 60
+python -m managed_agents.main sentinel --interval 120
 ```
-哨兵会在盘中每60秒扫描一次热点变化+北向异动，有异常立即推送微信。

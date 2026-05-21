@@ -42,28 +42,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from astock_trade.utils.logging_setup import setup_logging, get_logger
+
+setup_logging()
+logger = get_logger("managed_agents")
+
 from managed_agents.agents.registry import AgentRegistry
 from managed_agents.agents.roles.sentinel import Sentinel
-from managed_agents.agents.roles.researcher import Researcher
-from managed_agents.agents.roles.strategist import Strategist
-from managed_agents.agents.roles.trader import Trader
-from managed_agents.agents.roles.risk_mgr import RiskMgr
+from managed_agents.agents.roles.morning_analyst import MorningAnalyst
+from managed_agents.agents.roles.researcher_trader import ResearcherTrader
+from managed_agents.agents.roles.day_trader import DayTrader
+from managed_agents.agents.roles.risk_officer import RiskOfficer
+from managed_agents.agents.roles.portfolio_manager import PortfolioManager
 from managed_agents.sessions.session_manager import SessionManager
 from managed_agents.coordinator.coordinator import Coordinator
 from managed_agents.memory.memory_store import MemoryStore
-from managed_agents.utils.notifier import notify
+from managed_agents.utils.notifier import notify, sleep_until_next_session
 from managed_agents.config import get_config
 from managed_agents.backtest.engine import DecisionChainBacktester, BacktestConfig, DEFAULT_POOL
 from managed_agents.backtest.report import AttributionReport
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logger = logging.getLogger("managed_agents")
-
-ALL_AGENT_CLASSES = [Sentinel, Researcher, Strategist, Trader, RiskMgr]
+ALL_AGENT_CLASSES = [Sentinel, MorningAnalyst, ResearcherTrader, DayTrader, RiskOfficer, PortfolioManager]
 
 
 def _setup(all_agents: bool = False):
@@ -117,14 +116,19 @@ def run_sentinel(interval: int = 120):
                     notify_level = {"普通": "info", "关注": "warn", "紧急": "alert"}.get(level, "info")
                     notify(alert["title"], alert.get("detail", ""), notify_level)
 
-            # 盘后休眠更长时间
+            # 盘后深度休眠到次日盘前，零 API/Token 消耗
             if Sentinel._is_trading_time():
                 time.sleep(interval)
             else:
-                time.sleep(300)  # 盘后每5分钟检查一次是否到交易时间
+                s = sleep_until_next_session()
+                if s > 0:
+                    logger.info(f"盘后休眠 {s/3600:.1f}h，{datetime.fromtimestamp(time.time() + s).strftime('%m-%d %H:%M')} 唤醒")
+                    time.sleep(s)
+                else:
+                    time.sleep(interval)  # 盘中非交易时段（如 9:00-9:25），等待下次扫描
 
     except KeyboardInterrupt:
-        notify("哨兵下线", "盯盘已停止", "info")
+        notify("哨兵下线", "盯盘已停止", "info", force=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -390,11 +394,16 @@ def run_feishu_bot():
                         notify(alert["title"], alert.get("detail", ""), level)
                 except Exception as e:
                     logger.warning(f"哨兵扫描异常: {e}")
-                # 盘后休眠更长时间
+                # 盘后深度休眠到次日盘前，零 API/Token 消耗
                 if Sentinel._is_trading_time():
                     time.sleep(config.sentinel_scan_interval)
                 else:
-                    time.sleep(300)
+                    s = sleep_until_next_session()
+                    if s > 0:
+                        logger.info(f"哨兵盘后休眠 {s/3600:.1f}h")
+                        time.sleep(s)
+                    else:
+                        time.sleep(config.sentinel_scan_interval)
 
         sentinel_thread = threading.Thread(target=sentinel_loop, daemon=True)
         sentinel_thread.start()
@@ -423,6 +432,19 @@ def run_feishu_bot():
                 ) + "\n"
             except Exception:
                 pass
+
+            # 热点个股列表
+            try:
+                hs = markets.get_hotspots()
+                stocks = hs.get("top_stocks", [])[:12]
+                if stocks:
+                    data_context += "强势个股:\n" + "\n".join(
+                        f"• {s['code']} {s['name']} 题材:{s.get('reason','')[:20]}"
+                        for s in stocks
+                    ) + "\n"
+            except Exception:
+                pass
+
             try:
                 nb = markets.get_northbound()
                 data_context += f"北向资金: 沪股通{nb.get('latest_hgt',0):+.1f}亿 深股通{nb.get('latest_sgt',0):+.1f}亿 合计{nb.get('total',0):+.1f}亿 最新时间{nb.get('latest_time','')}\n"
@@ -444,7 +466,7 @@ def run_feishu_bot():
                 "你是A股交易助手。以下是当前实时行情数据：\n\n"
                 f"{data_context}\n"
                 "规则：基于以上实时数据回答用户问题。回复简洁直接，不超过3句话。\n"
-                "如果用户问的数据以上信息已有，直接回答；如果没有，说明需要哪种数据。\n"
+                "你有实时热点板块和强势个股数据。当用户问个股推荐时，基于热点板块中的领涨股给出具体建议，说明推荐逻辑（题材+个股名称代码）。\n"
                 f"用户消息：{user_text}"
             )
             resp = llm.call([{"role": "user", "content": prompt}])
@@ -457,7 +479,6 @@ def run_feishu_bot():
 
     logger.info("飞书全栈服务运行中，Ctrl+C 退出")
     try:
-        import time
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
@@ -466,7 +487,7 @@ def run_feishu_bot():
             scheduler.stop()
         if sentinel:
             sentinel_running = False
-        notify("飞书全栈下线", "bot + 哨兵 + 调度器已停止", "info")
+        notify("飞书全栈下线", "bot + 哨兵 + 调度器已停止", "info", force=True)
         logger.info("飞书全栈已退出")
         logger.info("飞书机器人已退出")
 

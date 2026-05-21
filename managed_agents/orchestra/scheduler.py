@@ -14,11 +14,13 @@ import threading
 import time
 from datetime import date, datetime, time as dt_time
 
+from astock_trade.utils.logging_setup import get_logger
+
 from .coordinator import Coordinator
 from ..agents.registry import AgentRegistry
-from ..utils.notifier import notify
+from ..utils.notifier import notify, sleep_until_next_session
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # 交易时段定义
 TRADING_SCHEDULE = {
@@ -96,7 +98,7 @@ class Scheduler:
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
-        notify("调度器下线", "交易时段调度已停止", "info")
+        notify("调度器下线", "交易时段调度已停止", "info", force=True)
         logger.info("Scheduler stopped")
 
     def _loop(self) -> None:
@@ -115,8 +117,15 @@ class Scheduler:
             period = _get_period(current_time)
             if period:
                 self._check_and_execute(period)
-
-            time.sleep(10)  # 每10秒检查一次
+                time.sleep(10)
+            else:
+                # 非交易时段 → 深度休眠到次日盘前，零消耗
+                s = sleep_until_next_session()
+                if s > 0:
+                    logger.info(f"调度器休眠 {s/3600:.1f}h，{datetime.fromtimestamp(time.time() + s).strftime('%m-%d %H:%M')} 唤醒")
+                    time.sleep(s)
+                else:
+                    time.sleep(10)
 
     def _check_and_execute(self, period: str) -> None:
         if not is_trading_day():
@@ -176,7 +185,7 @@ class Scheduler:
             pass
 
         if parts:
-            notify("盘前汇总", "\n\n".join(parts), "info")
+            notify("盘前汇总", "\n\n".join(parts), "info", force=True)
 
     def _execute_session_scan(self) -> None:
         """盘中: ResearcherTrader 扫描 + 信号生成."""
