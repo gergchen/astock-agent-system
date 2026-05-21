@@ -97,15 +97,20 @@ class Receiver:
                 return
 
             chat_id = msg.chat_id
+            sender_id = event.event.sender.sender_id.user_id if event.event.sender else "unknown"
             content = json.loads(msg.content)
             user_text = content.get("text", "")
+
+            # 不回复自己的消息
+            if sender_id == self._app_id:
+                return
 
             # 去除 @mention
             user_text = re.sub(r'@_\w+\s*', '', user_text).strip()
             if not user_text:
                 return
 
-            logger.info(f"收到: [{chat_id}] {user_text[:50]}")
+            logger.info(f"收到: sender={sender_id} [{chat_id}] {user_text[:50]}")
             reply = self._handler(chat_id, user_text)
             if reply:
                 send_message(chat_id, reply, self._app_id, self._app_secret)
