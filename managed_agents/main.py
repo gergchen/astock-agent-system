@@ -472,7 +472,7 @@ def run_feishu_bot():
                 f"用户消息：{user_text}"
             )
             resp = llm.call([{"role": "user", "content": prompt}])
-            return f"[笔记本] {resp[:8000]}"
+            return f"[台式机] {resp[:8000]}"
         except Exception as e:
             logger.error(f"LLM 回复失败: {e}")
             return "系统繁忙，请稍后再试"

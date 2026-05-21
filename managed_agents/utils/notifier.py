@@ -46,6 +46,8 @@ def sleep_until_next_session() -> float:
     return max(0, (target - now).total_seconds())
 
 
+SOURCE_TAG = "[台式机]"
+
 def notify(title: str, body: str = "", level: str = "info", force: bool = False) -> None:
     """通过飞书 webhook 发送通知，同时写入本地告警审计文件.
 
@@ -70,7 +72,7 @@ def notify(title: str, body: str = "", level: str = "info", force: bool = False)
 
     tag = {"info": "ℹ️", "warn": "⚠️", "alert": "🚨"}.get(level, "📢")
     now = datetime.now().strftime("%H:%M")
-    text = f"{tag} [{now}] {title}"
+    text = f"{SOURCE_TAG} {tag} [{now}] {title}"
     if body:
         text += f"\n{body}"
     text = text[:FEISHU_MAX_BODY]
