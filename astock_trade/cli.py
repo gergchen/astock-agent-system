@@ -687,5 +687,266 @@ def backtest_batch(
                 console.print(f"[red]✗[/red] {f['symbol']}: {f['error']}")
 
 
+kill_app = typer.Typer(help="急停 | Kill Switch — emergency stop / release")
+recover_app = typer.Typer(help="崩溃恢复 | Crash Recovery — position + order replay")
+regime_app = typer.Typer(help="市场状态 | Regime Engine — market state detection")
+portfolio_app = typer.Typer(help="组合优化 | Portfolio Optimization — risk budgeting")
+alpha_app = typer.Typer(help="Alpha评估 | Alpha Evaluation — signal quality metrics")
+
+app.add_typer(kill_app, name="kill")
+app.add_typer(recover_app, name="recover")
+app.add_typer(regime_app, name="regime")
+app.add_typer(portfolio_app, name="portfolio")
+app.add_typer(alpha_app, name="alpha")
+
+
+# ── Kill Switch Commands ───────────────────────────────────────────
+
+@kill_app.command(name="pull")
+def kill_pull(
+    reason: str = typer.Argument(..., help="急停原因 | Reason for kill"),
+    mode: str = typer.Option("graceful", "--mode", "-m", help="模式: graceful/immediate/hard"),
+    by: str = typer.Option("cli", "--by", help="触发者 | Who pulled the switch"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """拉下急停开关 — 停止所有交易 | Pull the kill switch — halt all trading."""
+    from .risk_engine import KillSwitch
+    ks = KillSwitch()
+    ks.pull(reason=reason, mode=mode, by=by)
+    data = ks.status()
+    if json_out:
+        _emit(data)
+    else:
+        console.print(f"[bold red]🔴 急停已触发 / Kill Switch PULLED[/bold red]")
+        console.print(f"  模式: {data['mode']}")
+        console.print(f"  原因: {data['reason']}")
+        console.print(f"  触发者: {data['killed_by']}")
+        console.print(f"  仅允许卖出: {data['allow_sell_only']}")
+
+
+@kill_app.command(name="release")
+def kill_release(
+    by: str = typer.Option("cli", "--by", help="释放者 | Who releases"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """释放急停开关 — 恢复交易 | Release the kill switch — resume trading."""
+    from .risk_engine import KillSwitch
+    ks = KillSwitch()
+    ks.release(by=by)
+    if json_out:
+        _emit({"status": "released", "by": by})
+    else:
+        console.print("[bold green]🟢 急停已释放 / Kill Switch RELEASED[/bold green]")
+
+
+@kill_app.command(name="status")
+def kill_status(
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """查看急停状态 | Check kill switch status."""
+    from .risk_engine import KillSwitch
+    ks = KillSwitch()
+    data = ks.status()
+    if json_out:
+        _emit(data)
+    else:
+        if data["killed"]:
+            console.print("[bold red]🔴 急停中 / KILLED[/bold red]")
+            console.print(f"  模式: {data['mode']}")
+            console.print(f"  原因: {data['reason']}")
+            console.print(f"  触发者: {data['killed_by']}")
+            console.print(f"  触发时间: {data['killed_at']}")
+            console.print(f"  仅允许卖出: {data['allow_sell_only']}")
+        else:
+            console.print("[bold green]🟢 正常 / KILL SWITCH NOT ACTIVE[/bold green]")
+
+
+# ── Crash Recovery Commands ───────────────────────────────────────
+
+@recover_app.command(name="run")
+def recover_run(
+    days_back: int = typer.Option(30, "--days", "-d", help="回看天数 | Days to look back"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """运行崩溃恢复 — 重建持仓 + 重放订单 | Run crash recovery."""
+    from .crash_recovery import run_crash_recovery
+    from .broker.mock_broker import MockBroker
+    from .signal_bus import SignalBus
+
+    broker = MockBroker()
+    bus = SignalBus()
+    result = run_crash_recovery(broker, bus, days_back=days_back)
+
+    if json_out:
+        _emit(result.to_dict())
+    else:
+        report = result.report
+        status_emoji = "✅" if report.status == "ok" else ("⚠️" if report.status == "warning" else "❌")
+        console.print(f"[bold]Crash Recovery Report {status_emoji}[/bold]")
+        console.print(f"  Broker positions loaded: {report.broker_positions_loaded}")
+        console.print(f"  Journal positions rebuilt: {report.journal_positions_rebuilt}")
+        console.print(f"  Stale orders requeued: {report.stale_orders_requeued}")
+        console.print(f"  Pending orders replayed: {report.pending_orders_replayed}")
+        if report.reconciliation_issues:
+            for issue in report.reconciliation_issues:
+                console.print(f"  [yellow]⚠ {issue}[/yellow]")
+        if report.errors:
+            for err in report.errors:
+                console.print(f"  [red]✗ {err}[/red]")
+        if result.account:
+            console.print(f"  Account: 现金={result.account.cash:.2f}  资产={result.account.total_assets:.2f}")
+        console.print(f"  Recovered: {result.recovered}")
+
+
+# ── Regime Engine Commands ────────────────────────────────────────
+
+@regime_app.command(name="detect")
+def regime_detect(
+    index_code: str = typer.Option("000300", "--index", "-i", help="指数代码 | Index code (000300=CSI300, 000905=CSI500)"),
+    lookback: int = typer.Option(60, "--lookback", "-l", help="回看天数 | Lookback days"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """检测当前市场状态 | Detect current market regime."""
+    from .regime_engine import RegimeEngine, REGIME_STRATEGY_MAP
+
+    engine = RegimeEngine(lookback_days=lookback)
+    signal = engine.detect_from_api(index_code=index_code)
+
+    if json_out:
+        _emit(signal.to_dict())
+    else:
+        regime_colors = {
+            "BULL": "green",
+            "BEAR": "red",
+            "OSCILLATION": "yellow",
+            "STRUCTURAL": "cyan",
+        }
+        color = regime_colors.get(signal.regime.value, "white")
+        console.print(f"[bold]市场状态 / Market Regime ({index_code})[/bold]")
+        console.print(f"  状态: [{color}]{signal.regime.value}[/{color}]  置信度: {signal.confidence:.0%}")
+        console.print(f"  风险乘数: {signal.risk_multiplier}  最大仓位: {signal.max_position_pct:.0%}")
+        console.print(f"  信号阈值: {signal.signal_threshold}")
+        console.print(f"  推荐策略: ", end="")
+        for name, score in signal.suggested_strategies:
+            console.print(f"[green]{name}({score})[/green] ", end="")
+        console.print()
+        console.print(f"[dim]详情: {signal.details}[/dim]")
+
+
+# ── Portfolio Optimization Commands ───────────────────────────────
+
+@portfolio_app.command(name="optimize")
+def portfolio_optimize(
+    symbols: str = typer.Argument(..., help="候选股票列表(逗号分隔) | Candidate stocks (comma-separated)"),
+    total_assets: float = typer.Option(1_000_000, "--assets", "-a", help="总资产 | Total assets"),
+    max_single: float = typer.Option(0.20, "--max-single", help="单只上限 | Max single position %"),
+    max_sector: float = typer.Option(0.30, "--max-sector", help="板块上限 | Max sector exposure %"),
+    max_total: float = typer.Option(0.70, "--max-total", help="总仓上限 | Max total position %"),
+    risk_mult: float = typer.Option(1.0, "--risk-mult", "-r", help="风险乘数(来自RegimeEngine) | Risk multiplier"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """运行组合优化 | Run portfolio optimization on candidate stocks."""
+    from .portfolio_optimizer import PortfolioOptimizer, StockInfo
+
+    symbols_list = [s.strip() for s in symbols.split(",")]
+    candidates = []
+    for sym in symbols_list:
+        if not sym:
+            continue
+        # Try to get sector and price info
+        sector = ""
+        price = 0.0
+        try:
+            from astock_data.market.tencent_finance import get_realtime_quotes
+            quotes = get_realtime_quotes([sym])
+            if quotes and sym in quotes:
+                q = quotes[sym]
+                sector = q.get("sector", "")
+                price = float(q.get("price", 0) or 0)
+        except Exception:
+            pass
+
+        candidates.append(StockInfo(
+            symbol=sym,
+            sector=sector,
+            volatility_pct=0.30,
+            momentum=0.0,
+            price=price,
+        ))
+
+    optimizer = PortfolioOptimizer(
+        max_single_pct=max_single,
+        max_sector_pct=max_sector,
+        max_total_pct=max_total,
+    )
+    alloc = optimizer.optimize(candidates, total_assets=total_assets,
+                               regime_risk_mult=risk_mult)
+
+    if json_out:
+        _emit(alloc.to_dict())
+    else:
+        console.print("[bold]组合优化结果 / Portfolio Allocation[/bold]")
+        console.print(f"  现金比例: {alloc.cash_pct:.1%}")
+        console.print(f"  预期波动: {alloc.expected_vol_pct:.2f}%")
+        console.print(f"  约束满足: {'✅' if alloc.constraints_satisfied else '❌'}")
+        console.print(f"  持仓明细:")
+        for sym, pct in sorted(alloc.positions.items(), key=lambda x: -x[1]):
+            rc = alloc.risk_contribution.get(sym, 0)
+            console.print(f"    {sym}: {pct:.1%}  (风险贡献: {rc:.4f})")
+        if alloc.sector_exposure:
+            console.print(f"  板块暴露:")
+            for sec, exp in sorted(alloc.sector_exposure.items(), key=lambda x: -x[1]):
+                console.print(f"    {sec}: {exp:.1%}")
+        if alloc.warnings:
+            for w in alloc.warnings:
+                console.print(f"  [yellow]⚠ {w}[/yellow]")
+
+
+# ── Alpha Evaluation Commands ────────────────────────────────────
+
+@alpha_app.command(name="evaluate")
+def alpha_evaluate(
+    signal_file: str = typer.Argument(..., help="信号CSV文件 | Signal CSV with columns: date,symbol,signal_value,forward_return_1d"),
+    name: str = typer.Option("signal", "--name", "-n", help="信号名称 | Signal name"),
+    json_out: bool = typer.Option(False, "--json", "-j", help="JSON输出"),
+):
+    """评估信号Alpha质量 | Evaluate signal alpha quality from CSV."""
+    from .alpha_evaluator import AlphaEvaluator, RankedSignal
+
+    import csv
+    signals = []
+    with open(signal_file, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            signals.append(RankedSignal(
+                symbol=row.get("symbol", ""),
+                date=row.get("date", ""),
+                signal_value=float(row.get("signal_value", 0)),
+                forward_return_1d=float(row.get("forward_return_1d", 0)),
+                forward_return_5d=float(row.get("forward_return_5d", 0)),
+                forward_return_10d=float(row.get("forward_return_10d", 0)),
+            ))
+
+    evaluator = AlphaEvaluator()
+    report = evaluator.evaluate(signals, signal_name=name)
+
+    if json_out:
+        _emit(report.to_dict())
+    else:
+        console.print(f"[bold]Alpha评估报告 / Alpha Report: {name}[/bold]")
+        console.print(f"  IC Mean:       {report.ic_mean:.4f}  (std={report.ic_std:.4f}, sharpe={report.ic_sharpe:.2f})")
+        console.print(f"  Rank IC Mean:  {report.rank_ic_mean:.4f}  (sharpe={report.rank_ic_sharpe:.2f})")
+        console.print(f"  IC>0:          {report.ic_positive_pct:.1%}")
+        console.print(f"  IC Decay:      1d={report.ic_decay_1d:.4f}  5d={report.ic_decay_5d:.4f}  10d={report.ic_decay_10d:.4f}")
+        console.print(f"  IC Half-life:  {report.ic_half_life_days:.1f} days")
+        console.print(f"  Exposure:      {report.exposure_pct:.1%}")
+        console.print(f"  Turnover:      {report.turnover_pct:.1%}")
+        console.print(f"  Signal Sharpe: {report.sharpe_ratio:.2f}")
+        console.print(f"  统计显著:      {'✅' if report.significant else '❌'}")
+        if report.warnings:
+            for w in report.warnings:
+                console.print(f"  [yellow]⚠ {w}[/yellow]")
+
+
 if __name__ == "__main__":
     app()
