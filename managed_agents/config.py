@@ -1,5 +1,6 @@
 """Managed Agents 全局配置."""
 
+import json
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -54,6 +55,31 @@ class Config:
     feishu_webhook_url: str = os.environ.get("FEISHU_WEBHOOK_URL", "")
     feishu_app_id: str = os.environ.get("FEISHU_APP_ID", "")
     feishu_app_secret: str = os.environ.get("FEISHU_APP_SECRET", "")
+    feishu_chat_id: str = os.environ.get("FEISHU_CHAT_ID", "")
+
+    # Douyin monitoring
+    douyin_api_base_url: str = os.environ.get(
+        "DOUYIN_API_BASE_URL", "http://localhost:8000"
+    )
+    douyin_poll_interval: int = int(os.environ.get(
+        "DOUYIN_POLL_INTERVAL", "600"
+    ))
+    douyin_max_videos_per_scan: int = int(os.environ.get(
+        "DOUYIN_MAX_VIDEOS_PER_SCAN", "20"
+    ))
+    douyin_enable_vision: bool = os.environ.get(
+        "DOUYIN_ENABLE_VISION", "false"
+    ).lower() == "true"
+    douyin_vision_model: str = os.environ.get(
+        "DOUYIN_VISION_MODEL", "claude-sonnet-4-6"
+    )
+    douyin_max_concurrent: int = int(os.environ.get(
+        "DOUYIN_MAX_CONCURRENT", "3"
+    ))
+    douyin_rate_limit: int = int(os.environ.get(
+        "DOUYIN_RATE_LIMIT", "30"
+    ))
+    douyin_monitored_users: list[dict] = field(default_factory=lambda: _parse_douyin_users())
 
     def __post_init__(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -61,6 +87,21 @@ class Config:
         (self.data_dir / "memory").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "vaults").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "douyin").mkdir(parents=True, exist_ok=True)
+
+
+def _parse_douyin_users() -> list[dict]:
+    """从环境变量 DOUYIN_MONITORED_USERS 解析监控用户列表."""
+    raw = os.environ.get("DOUYIN_MONITORED_USERS", "")
+    if not raw:
+        return []
+    try:
+        users = json.loads(raw)
+        return users if isinstance(users, list) else []
+    except json.JSONDecodeError:
+        import logging
+        logging.getLogger(__name__).warning("DOUYIN_MONITORED_USERS 格式错误, 需要 JSON 数组")
+        return []
 
 
 _config: Config | None = None

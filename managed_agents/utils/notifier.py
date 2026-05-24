@@ -26,20 +26,25 @@ def is_notify_time() -> bool:
 
 
 def sleep_until_next_session() -> float:
-    """计算到下一个交易时段（8:55）的休眠秒数。
+    """计算到下一个交易时段（9:00）的休眠秒数。
 
     盘后直接深度休眠到次日盘前，避免空转消耗 API/Token。
     当前已在 9:00-15:05 活跃窗口内返回 0。
+    盘前（如 8:55）等今日 9:00，不等次日。
     """
     now = datetime.now()
 
-    # 交易日 + 在活跃窗口内 → 不休眠
+    # 交易日盘中 → 不休眠
     if now.weekday() < 5 and dt_time(9, 0) <= now.time() <= SYSTEM_ACTIVE_END:
         return 0
 
-    # 跳到下一天 9:00（对齐自动开机时间）
+    # 交易日盘前（< 9:00）→ 等今天 9:00
+    if now.weekday() < 5 and now.time() < dt_time(9, 0):
+        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        return max(0, (target - now).total_seconds())
+
+    # 盘后 or 非交易日 → 跳到下一天 9:00
     target = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    # 跳过周末
     while target.weekday() >= 5:
         target += timedelta(days=1)
 
@@ -49,7 +54,7 @@ def sleep_until_next_session() -> float:
 SOURCE_TAG = "[台式机]"
 
 def notify(title: str, body: str = "", level: str = "info", force: bool = False) -> None:
-    """通过飞书 webhook 发送通知，同时写入本地告警审计文件.
+    """通过飞书推送通知（优先 bot API，回退 webhook），同时写入本地告警审计文件.
 
     Args:
         force: 为 True 时绕过交易时间限制，用于系统下线/异常等关键通知。
@@ -65,10 +70,7 @@ def notify(title: str, body: str = "", level: str = "info", force: bool = False)
         return
 
     from ..config import get_config
-
-    url = get_config().feishu_webhook_url
-    if not url:
-        return
+    cfg = get_config()
 
     tag = {"info": "ℹ️", "warn": "⚠️", "alert": "🚨"}.get(level, "📢")
     now = datetime.now().strftime("%H:%M")
@@ -77,12 +79,30 @@ def notify(title: str, body: str = "", level: str = "info", force: bool = False)
         text += f"\n{body}"
     text = text[:FEISHU_MAX_BODY]
 
+    # 优先走 bot API（新 im 接口 + 回退兼容）
+    if cfg.feishu_app_id and cfg.feishu_chat_id:
+        try:
+            from managed_agents.im.feishu_adapter import FeishuAdapter
+            fs = FeishuAdapter(cfg.feishu_app_id, cfg.feishu_app_secret)
+            result = fs.send(cfg.feishu_chat_id, text)
+            if result.success:
+                logger.info(f"通知已发送(bot): {title}")
+                return
+            logger.warning(f"bot 发送失败，回退 webhook: {title}")
+        except Exception as e:
+            logger.warning(f"bot 发送异常，回退 webhook: {e}")
+
+    # 回退：webhook
+    url = cfg.feishu_webhook_url
+    if not url:
+        return
+
     payload = json.dumps({"msg_type": "text", "content": {"text": text}}).encode()
 
     try:
         req = Request(url, data=payload, headers={"Content-Type": "application/json"})
         urlopen(req, timeout=5)
-        logger.info(f"通知已发送: {title}")
+        logger.info(f"通知已发送(webhook): {title}")
     except Exception as e:
         logger.warning(f"通知失败: {e}")
 

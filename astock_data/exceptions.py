@@ -56,6 +56,11 @@ class ConfigError(AStockError):
     pass
 
 
+class DataUnavailableError(DataSourceError):
+    """Raised when no source can provide the requested data."""
+    pass
+
+
 class ValidationError(AStockError):
     """Input validation errors (bad stock code, date range)."""
     pass

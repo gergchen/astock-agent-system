@@ -19,17 +19,14 @@ from ..exceptions import THSError
 
 THS_HOT_URL = "http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
 
+# NOTE: The API response only contains these fields (verified 2026-05):
+#   id, 名称, 代码, 题材归因, date, 市场
+# It does NOT include gain%, volume, turnover, or DDE data.
+# For real-time gain%, use tencent_finance.get_valuation() instead.
 RENAME_MAP = {
     "name": "名称",
     "code": "代码",
     "reason": "题材归因",
-    "close": "收盘价",
-    "zhangdie": "涨跌额",
-    "zhangfu": "涨幅%",
-    "huanshou": "换手率%",
-    "chengjiaoe": "成交额",
-    "chengjiaoliang": "成交量",
-    "ddejingliang": "大单净量",
     "market": "市场",
 }
 

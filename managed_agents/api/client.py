@@ -41,6 +41,7 @@ class APIClient:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.config.llm_api_key}",
+                "anthropic-version": "2023-06-01",
             },
         )
 
@@ -136,6 +137,7 @@ class APIClient:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.config.llm_api_key}",
+                "anthropic-version": "2023-06-01",
             },
         )
 

@@ -32,6 +32,7 @@ fund_app = typer.Typer(help="Fundamental data (mootdx finance/F10 + akshare)")
 ann_app = typer.Typer(help="Announcements (巨潮 cninfo + mootdx)")
 workflow_app = typer.Typer(help="Research workflows (valuation, batch, thematic)")
 config_app = typer.Typer(help="Configuration and cache management")
+ta_app = typer.Typer(help="Technical analysis (TA-Lib indicators, patterns, CYQ)")
 
 app.add_typer(market_app, name="market")
 app.add_typer(signal_app, name="signal")
@@ -41,6 +42,7 @@ app.add_typer(fund_app, name="fund")
 app.add_typer(ann_app, name="ann")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(config_app, name="config")
+app.add_typer(ta_app, name="ta")
 
 # Shared options decorator
 def common_options(func):
@@ -392,6 +394,207 @@ def config_keys(
         import os
         os.environ["IWENCAI_API_KEY"] = set_iwencai
         print(f"iwencai key set (session only). For permanent, run: export IWENCAI_API_KEY={set_iwencai}")
+
+
+# ── Technical Analysis Commands ────────────────────────────────────
+
+@ta_app.command(name="indicators")
+def ta_indicators(
+    code: str = typer.Argument(..., help="6-digit stock code"),
+    output: str = typer.Option("json", "-o", help="Output format"),
+):
+    """Compute 32 TA-Lib technical indicators (MACD, KDJ, RSI, BOLL, etc.)."""
+    from .market.mootdx_quote import get_kline
+    from .ta.indicators import get_latest_indicators
+    df = get_kline(code, "day", 365)
+    if df is None or len(df) == 0:
+        _emit({"error": f"无法获取 {code} 的K线数据"}, output)
+        raise typer.Exit(1)
+    data = get_latest_indicators(df)
+    _emit(data, output)
+
+
+@ta_app.command(name="patterns")
+def ta_patterns(
+    code: str = typer.Argument(..., help="6-digit stock code"),
+    output: str = typer.Option("json", "-o", help="Output format"),
+):
+    """Identify 61 K-line patterns (hammer, engulfing, morning star, etc.)."""
+    from .market.mootdx_quote import get_kline
+    from .ta.patterns import get_latest_patterns
+    df = get_kline(code, "day", 365)
+    if df is None or len(df) == 0:
+        _emit({"error": f"无法获取 {code} 的K线数据"}, output)
+        raise typer.Exit(1)
+    data = get_latest_patterns(df)
+    _emit(data, output)
+
+
+@ta_app.command(name="signals")
+def ta_signals(
+    code: str = typer.Argument(..., help="6-digit stock code"),
+    output: str = typer.Option("json", "-o", help="Output format"),
+):
+    """Get overbought/oversold signals from indicator thresholds."""
+    from .market.mootdx_quote import get_kline
+    from .ta.indicators import get_latest_indicators
+    from .ta.signals import get_technical_signals
+    df = get_kline(code, "day", 365)
+    if df is None or len(df) == 0:
+        _emit({"error": f"无法获取 {code} 的K线数据"}, output)
+        raise typer.Exit(1)
+    indicators = get_latest_indicators(df)
+    data = {
+        "indicators": indicators,
+        "signals": get_technical_signals(indicators),
+    }
+    _emit(data, output)
+
+
+@ta_app.command(name="cyq")
+def ta_cyq(
+    code: str = typer.Argument(..., help="6-digit stock code"),
+    output: str = typer.Option("json", "-o", help="Output format"),
+):
+    """Compute chip distribution / cost分布 (CYQ)."""
+    from .market.mootdx_quote import get_kline
+    from .ta.cyq import compute_chip_distribution
+    from .market.tencent_finance import get_valuation
+
+    df = get_kline(code, "day", 365)
+    if df is None or len(df) == 0:
+        _emit({"error": f"无法获取 {code} 的K线数据"}, output)
+        raise typer.Exit(1)
+
+    # 补充换手率
+    val = get_valuation([code])
+    df["turnover"] = 0.0
+    if val and code in val:
+        tp = val[code].get("turnover_pct", 0)
+        if isinstance(tp, (int, float)):
+            df.iloc[-1, df.columns.get_loc("turnover")] = tp
+
+    result = compute_chip_distribution(df)
+    if result:
+        # 精简输出（去掉原始数组）
+        summary = {
+            "avg_cost": result["avg_cost"],
+            "benefit_part": result["benefit_part"],
+            "percent_chips": result["percent_chips"],
+            "trading_days": result["t"],
+        }
+        _emit(summary, output)
+    else:
+        _emit({"error": "筹码分布计算失败"}, output)
+
+
+@ta_app.command(name="analysis")
+def ta_analysis(
+    code: str = typer.Argument(..., help="6-digit stock code"),
+    output: str = typer.Option("json", "-o", help="Output format"),
+):
+    """Full technical analysis: indicators + patterns + signals + CYQ."""
+    from .market.mootdx_quote import get_kline
+    from .ta import (
+        get_latest_indicators, get_latest_patterns,
+        get_pattern_buy_signals, get_pattern_sell_signals,
+        get_technical_signals,
+    )
+
+    df = get_kline(code, "day", 365)
+    if df is None or len(df) == 0:
+        _emit({"error": f"无法获取 {code} 的K线数据"}, output)
+        raise typer.Exit(1)
+
+    indicators = get_latest_indicators(df)
+    patterns = get_latest_patterns(df)
+    indicator_signals = get_technical_signals(indicators)
+    pattern_buy = get_pattern_buy_signals(df)
+    pattern_sell = get_pattern_sell_signals(df)
+    # 中文名映射
+    pattern_details = {}
+    for p in pattern_buy:
+        pattern_details[p["field"]] = {"name_cn": p["name_cn"], "signal": "买入"}
+    for p in pattern_sell:
+        pattern_details[p["field"]] = {"name_cn": p["name_cn"], "signal": "卖出"}
+
+    data = {
+        "code": code,
+        "indicators": indicators,
+        "indicator_signals": indicator_signals,
+        "patterns": {k: v for k, v in patterns.items() if v != 0},
+        "pattern_details": pattern_details,
+    }
+    _emit(data, output)
+
+
+@ta_app.command(name="batch")
+def ta_batch(
+    codes: list[str] = typer.Argument(..., help="6-digit stock codes (space-separated)"),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel fetch workers"),
+    output: str = typer.Option("json", "-o", help="Output format"),
+):
+    """Batch technical analysis — fetch & analyze multiple stocks in parallel.
+
+    Uses ThreadPoolExecutor to fetch K-line data concurrently,
+    then runs indicators + patterns + signals on each stock.
+
+    Examples:
+        astock ta batch 600519 000858 002230
+        astock ta batch 600519 000858 --workers 10
+    """
+    import time
+    from .market.mootdx_quote import batch_kline
+    from .ta import (
+        get_latest_indicators, get_latest_patterns,
+        get_pattern_buy_signals, get_pattern_sell_signals,
+        get_technical_signals,
+    )
+
+    start = time.time()
+
+    # Strip any prefix letters (sh, sz) and normalize
+    codes = [str(c).strip() for c in codes]
+
+    # Fetch all in parallel
+    klines = batch_kline(codes, "day", 365, max_workers=workers)
+
+    results = {}
+    for code, df in klines.items():
+        indicators = get_latest_indicators(df)
+        patterns = get_latest_patterns(df)
+        indicator_signals = get_technical_signals(indicators)
+        pattern_buy = get_pattern_buy_signals(df)
+        pattern_sell = get_pattern_sell_signals(df)
+
+        pattern_details = {}
+        for p in pattern_buy:
+            pattern_details[p["field"]] = {"name_cn": p["name_cn"], "signal": "买入"}
+        for p in pattern_sell:
+            pattern_details[p["field"]] = {"name_cn": p["name_cn"], "signal": "卖出"}
+
+        results[code] = {
+            "indicators": indicators,
+            "indicator_signals": indicator_signals,
+            "patterns": {k: v for k, v in patterns.items() if v != 0},
+            "pattern_details": pattern_details,
+        }
+
+    # Report failed codes
+    failed = [c for c in codes if c not in klines]
+    for c in failed:
+        results[c] = {"error": "无法获取K线数据"}
+
+    elapsed = time.time() - start
+
+    data = {
+        "total": len(codes),
+        "success": len(klines),
+        "failed": len(failed),
+        "elapsed_seconds": round(elapsed, 1),
+        "stocks": results,
+    }
+    _emit(data, output)
 
 
 @app.callback()

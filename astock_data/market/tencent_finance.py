@@ -11,6 +11,7 @@ Field index (calibrated 2026-05):
   49=vol_ratio, 52=PE(static)
 """
 
+import logging
 import urllib.request
 
 from ..config import get_config
@@ -58,8 +59,24 @@ def _fetch_raw(codes: list[str]) -> str:
         raise TencentFinanceError(f"Tencent Finance fetch failed: {e}") from e
 
 
+def _validate_field_positive(vals: list[str], idx: int, name: str, code: str) -> float:
+    """Parse and validate a numeric field must be positive."""
+    raw = vals[idx] if idx < len(vals) else ""
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        val = 0.0
+    if val <= 0:
+        raise TencentFinanceError(f"{code}: {name}={raw} (invalid)")
+    return val
+
+
 def _parse_response(raw: str) -> dict[str, dict]:
-    """Parse Tencent semicolon-delimited ~-separated response."""
+    """Parse Tencent semicolon-delimited ~-separated response.
+
+    Validates critical fields are present and internally consistent.
+    Raises TencentFinanceError for individual stocks with bad data.
+    """
     result = {}
     for line in raw.strip().split(";"):
         if not line.strip() or "=" not in line or '"' not in line:
@@ -70,15 +87,28 @@ def _parse_response(raw: str) -> dict[str, dict]:
             continue
         code = key[2:]
         try:
+            # Validate critical price fields (must be positive)
+            price = _validate_field_positive(vals, 3, "price", code)
+            last_close = _validate_field_positive(vals, 4, "last_close", code)
+            open_ = float(vals[5]) if vals[5] else 0
+            high = _validate_field_positive(vals, 33, "high", code)
+            low = float(vals[34]) if vals[34] else 0
+
+            # Range sanity: high >= low, high >= price >= low
+            if low <= 0 or high < low:
+                raise TencentFinanceError(f"{code}: high={high} < low={low} (inverted)")
+            if price > high * 1.1 or price < low * 0.9:
+                raise TencentFinanceError(f"{code}: price={price} outside [{low}, {high}]")
+
             result[code] = {
                 "name": vals[1],
-                "price": float(vals[3]) if vals[3] else 0,
-                "last_close": float(vals[4]) if vals[4] else 0,
-                "open": float(vals[5]) if vals[5] else 0,
+                "price": price,
+                "last_close": last_close,
+                "open": open_,
                 "change_amt": float(vals[31]) if vals[31] else 0,
                 "change_pct": float(vals[32]) if vals[32] else 0,
-                "high": float(vals[33]) if vals[33] else 0,
-                "low": float(vals[34]) if vals[34] else 0,
+                "high": high,
+                "low": low,
                 "amount_wan": float(vals[37]) if vals[37] else 0,
                 "turnover_pct": float(vals[38]) if vals[38] else 0,
                 "pe_ttm": float(vals[39]) if vals[39] else 0,
@@ -91,7 +121,9 @@ def _parse_response(raw: str) -> dict[str, dict]:
                 "vol_ratio": float(vals[49]) if vals[49] else 0,
                 "pe_static": float(vals[52]) if vals[52] else 0,
             }
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, TencentFinanceError) as e:
+            logger = logging.getLogger(__name__)
+            logger.warning("Skipping %s: %s", code, e)
             continue
     return result
 

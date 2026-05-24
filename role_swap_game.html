@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>角色互换 — 一日体验</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  padding: 20px;
+}
+.game-container {
+  max-width: 600px;
+  width: 100%;
+  background: rgba(255,255,255,0.05);
+  border-radius: 24px;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 30px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  min-height: 500px;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+.header h1 {
+  color: #e8d5b7;
+  font-size: 1.5em;
+  letter-spacing: 4px;
+  font-weight: 300;
+}
+.header .subtitle {
+  color: rgba(232,213,183,0.5);
+  font-size: 0.85em;
+  margin-top: 4px;
+}
+.scene {
+  flex: 1;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.scene-text {
+  color: #f0e6d3;
+  font-size: 1.05em;
+  line-height: 1.8;
+  padding: 16px 0;
+  min-height: 120px;
+  white-space: pre-wrap;
+}
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+.choice-btn {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(232,213,183,0.2);
+  color: #e8d5b7;
+  padding: 14px 18px;
+  border-radius: 12px;
+  font-size: 0.95em;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-align: left;
+  font-family: inherit;
+}
+.choice-btn:hover {
+  background: rgba(232,213,183,0.12);
+  border-color: rgba(232,213,183,0.5);
+  transform: translateX(4px);
+}
+.choice-btn:active { transform: scale(0.98); }
+.choice-btn.highlight {
+  background: rgba(232,213,183,0.15);
+  border-color: #e8d5b7;
+}
+.progress-bar {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.1);
+  transition: all 0.4s;
+}
+.dot.active { background: #e8d5b7; box-shadow: 0 0 8px rgba(232,213,183,0.4); }
+.dot.passed { background: rgba(232,213,183,0.3); }
+.footer {
+  text-align: center;
+  margin-top: 20px;
+  color: rgba(255,255,255,0.2);
+  font-size: 0.75em;
+}
+.restart-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(232,213,183,0.4);
+  padding: 8px 20px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 0.85em;
+  font-family: inherit;
+  transition: all 0.3s;
+  margin-top: 12px;
+}
+.restart-btn:hover {
+  border-color: rgba(232,213,183,0.3);
+  color: rgba(232,213,183,0.7);
+}
+.fade-in { animation: fadeIn 0.5s ease; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 4px 16px;
+  color: rgba(232,213,183,0.4);
+  font-size: 0.8em;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  margin-bottom: 8px;
+}
+</style>
+</head>
+<body>
+<div class="game-container">
+  <div class="header">
+    <h1>✦ 角色互换 ✦</h1>
+    <div class="subtitle">一日体验 · 选择你的故事</div>
+  </div>
+  <div class="progress-bar" id="progressBar"></div>
+  <div class="status-bar">
+    <span id="sceneLabel">第 1 幕</span>
+    <span id="endingLabel"></span>
+  </div>
+  <div class="scene" id="scene">
+    <div class="scene-text fade-in" id="sceneText"></div>
+    <div class="choices" id="choices"></div>
+  </div>
+  <div class="footer">
+    <button class="restart-btn" id="restartBtn" style="display:none">重新开始</button>
+  </div>
+</div>
+<script>
+const game = {
+  currentScene: 'start',
+  visited: new Set(),
+  history: [],
+
+  scenes: {
+    start: {
+      label: '第 1 幕',
+      text: '周六早晨七点，你被闹钟叫醒。\n睁开眼，感觉有些不对劲——\n\n你习惯性地伸了个懒腰，却发现...\n\n等等，这手怎么不太对？\n\n你猛地坐起来，冲到镜子前——\n\n镜子里是一个完全陌生的自己。\n\n你——变成了另一个性别。',
+      choices: [
+        { text: '◈ 惊慌失措，试图找回原来的自己', next: 'panic' },
+        { text: '◈ 冷静下来，先搞清楚发生了什么', next: 'calm' },
+      ]
+    },
+    panic: {
+      label: '第 2 幕',
+      text: '你在房间里来回踱步，心跳加速。\n\n"这不可能不可能不可能..."\n\n你疯狂地搜索记忆，试图找到原因。\n\n昨晚睡前看的那条奇怪新闻？\n还是那个莫名其妙的 APP 更新？\n\n这时电话响了——是你最好的朋友。',
+      choices: [
+        { text: '◈ 接电话，告诉 TA 发生的事', next: 'call_friend' },
+        { text: '◈ 不接，自己出门找答案', next: 'go_out_anxious' },
+      ]
+    },
+    calm: {
+      label: '第 2 幕',
+      text: '你深吸一口气，坐下来。\n\n既然发生了，慌也没用。\n\n你先检查了一下——身体很健康，\n只是性别变了。记忆、性格都还在。\n\n你决定今天用这个身份出门，\n体验一下截然不同的一天。\n\n出门前，你想穿什么样的衣服？',
+      choices: [
+        { text: '◈ 穿自己原来风格的 clothes', next: 'own_style' },
+        { text: '◈ 尝试符合现在性别的打扮', next: 'new_style' },
+      ]
+    },
+    call_friend: {
+      label: '第 3 幕',
+      text: '"喂？你声音怎么怪怪的？"\n\n你犹豫了一下，还是把事情说了。\n\n电话那头沉默了三秒，然后——\n\n"哈哈哈你别逗我了！"\n\n"等等...你真没开玩笑？"\n\n一小时后，TA 出现在你家门口。\n\n看到你的那一刻，TA 的表情\n从震惊变成了好奇。',
+      choices: [
+        { text: '◈ 让 TA 陪你去查个究竟', next: 'investigate_together' },
+        { text: '◈ 决定自己消化，让 TA 先回去', next: 'alone_reflect' },
+      ]
+    },
+    go_out_anxious: {
+      label: '第 3 幕',
+      text: '你套上外套就出了门。\n\n街上人来人往，没有人注意到你。\n\n你走进常去的那家咖啡店。\n\n老板看了你一眼："欢迎光临，\n第一次来吗？想喝点什么？"\n\n他没认出你。\n\n你突然意识到——在别人眼里，\n你是一个完全不同的人。',
+      choices: [
+        { text: '◈ 趁机以一个陌生人的身份和人聊聊', next: 'stranger_talk' },
+        { text: '◈ 点完咖啡就回家，不想多待', next: 'go_home' },
+      ]
+    },
+    own_style: {
+      label: '第 3 幕',
+      text: '你穿上自己最熟悉的衣服。\n\n虽然穿在现在的身上效果\n完全不一样，但感觉安心。\n\n你决定去公司转转——\n今天是周末，应该没人，\n但你很好奇同事会怎么看你。\n\n路过小区门口，邻居阿姨\n打量了你一眼，笑了笑：\n"小姑娘，住这栋楼的？\n以前没见过你呀。"',
+      choices: [
+        { text: '◈ 顺着阿姨的话聊下去', next: 'neighbor_chat' },
+        { text: '◈ 尴尬地笑笑，快步走开', next: 'walk_away' },
+      ]
+    },
+    new_style: {
+      label: '第 3 幕',
+      text: '你换上了一套适合现在的自己的衣服。\n\n站在镜子前，你愣了一下——\n原来自己可以是这样子的。\n\n你决定去逛逛商场。\n\n走进第一家店，店员热情地迎上来：\n"您好，想看看什么？\n我们最近上了新款~"\n\n你发现别人对你的态度\n似乎和以前不太一样了。',
+      choices: [
+        { text: '◈ 享受这种不同的对待方式', next: 'enjoy_attention' },
+        { text: '◈ 觉得不习惯，想回到原来的样子', next: 'uncomfortable' },
+      ]
+    },
+    investigate_together: {
+      label: '第 4 幕',
+      text: '你和朋友开始排查线索。\n\n翻遍了你昨晚的浏览记录，\n终于找到一条可疑的链接：\n\n"一日体验——换位思考计划"\n\n你点进去，页面只有一行字：\n\n「体验将在 24 小时后自动结束。」\n\n你和朋友对视了一眼。',
+      choices: [
+        { text: '◈ "那我要好好体验这 24 小时"', next: 'embrace_ending_a' },
+        { text: '◈ 想办法提前结束它', next: 'fight_ending_b' },
+      ]
+    },
+    alone_reflect: {
+      label: '第 4 幕',
+      text: '朋友走后，你一个人坐在房间里。\n\n你打开手机，想搜搜有没有\n类似经历的人。\n\n结果真的搜到一个神秘的帖子：\n\n「别慌，明早起来就好了。」\n\n发帖时间：昨天。\n\n下面还有一条回复：\n\n「好好体验这一天，\n你会学到很多东西。」',
+      choices: [
+        { text: '◈ 决定出去走走，拥抱这一天', next: 'embrace_ending_a' },
+        { text: '◈ 不信邪，使劲找解决办法', next: 'fight_ending_b' },
+      ]
+    },
+    stranger_talk: {
+      label: '第 4 幕',
+      text: '你端着咖啡坐到了吧台。\n\n旁边的人开始跟你聊天——\n很随意的那种陌生人闲聊。\n\n你发现对方说话的方式\n和对待你的态度，\n跟你以前经历的很不一样。\n\n聊了半小时，你学到了很多。\n\n原来同一句话，\n以不同的性别听到，\n感受可以完全不同。',
+      choices: [
+        { text: '◈ 继续深入聊天，了解更多', next: 'deepen_understanding' },
+        { text: '◈ 谢过对方，回家消化一下', next: 'digest_home' },
+      ]
+    },
+    go_home: {
+      label: '第 4 幕',
+      text: '回到家，你把自己关在房间里。\n\n你打开手机前置摄像头，\n看着屏幕里陌生的自己。\n\n突然手机弹出一条通知：\n\n「换位思考体验已激活，\n将在 24 小时后自动结束。\n祝你有收获的一天 :)」\n\n原来这不是意外。',
+      choices: [
+        { text: '◈ 那就不浪费这次体验', next: 'embrace_ending_a' },
+        { text: '◈ 还是觉得难以接受', next: 'fight_ending_b' },
+      ]
+    },
+    neighbor_chat: {
+      label: '第 4 幕',
+      text: '"阿姨早，我刚搬来不久。"\n\n你也不知道自己为什么\n要这么说。\n\n"哦哦，新邻居啊！\n做什么工作的？有对象了没？"\n\n阿姨的热情让你有点招架不住。\n\n聊了十分钟，阿姨从你的工作\n聊到婚姻观，最后叹了口气：\n\n"你们年轻人啊，想法不一样了。"',
+      choices: [
+        { text: '◈ 追问阿姨为什么这么说', next: 'generation_talk' },
+        { text: '◈ 笑笑告别，去公司', next: 'to_office' },
+      ]
+    },
+    walk_away: {
+      label: '第 4 幕',
+      text: '你低着头快步走开，\n心跳得厉害。\n\n到了公司门口，你才想起\n今天是周六，大门锁着。\n\n你在门前的台阶上坐下，\n掏出手机，看到一条\n来自未知号码的短信：\n\n「感觉怎么样？\n这才是一部分人的日常哦。」',
+      choices: [
+        { text: '◈ 回短信，问对方是谁', next: 'mystery_text' },
+        { text: '◈ 放下手机，好好感受这一天', next: 'embrace_ending_a' },
+      ]
+    },
+    enjoy_attention: {
+      label: '第 4 幕',
+      text: '你试了几套衣服，店员的服务\n热情得让你有点意外。\n\n结账时，店员笑着说：\n"这套真的很适合你！"\n\n你看着镜子里的自己——\n确实挺好看的。\n\n你突然想到：以前作为原来的自己，\n是不是也错过了一些\n表达自己的机会？',
+      choices: [
+        { text: '◈ 继续探索，买更多新风格', next: 'shopping_more' },
+        { text: '◈ 够了一回家了', next: 'digest_home' },
+      ]
+    },
+    uncomfortable: {
+      label: '第 4 幕',
+      text: '你匆匆离开了商场。\n\n不是因为不好看，\n而是太不一样了。\n\n你在路边的长椅上坐下，\n掏出手机想看点熟悉的东西。\n\n然后你刷到了那个视频——\n\n「如果你一觉醒来变成了\n另一个性别，你会怎么做？」\n\n点赞最高的评论写着：\n\n「先别急，你会发现\n很多事情不是你想的那样。」',
+      choices: [
+        { text: '◈ 决定用这一天来验证这句话', next: 'embrace_ending_a' },
+        { text: '◈ 还是想变回去', next: 'fight_ending_b' },
+      ]
+    },
+    deepen_understanding: {
+      label: '第 5 幕 — 终章',
+      text: '你们聊了很久。\n\n从日常生活到成长经历，\n从社会期待到自我认知。\n\n你发现很多以前从没想过的问题，\n在这个全新的视角下变得清晰。\n\n傍晚回到家，你站在镜子前。\n\n你不知道明天醒来会不会变回去，\n但你知道——\n\n你已经不再是今天之前的自己了。',
+      choices: [
+        { text: '✦ 带着今天的感悟入睡', next: 'ending_understanding' },
+      ]
+    },
+    generation_talk: {
+      label: '第 5 幕 — 终章',
+      text: '"现在社会变化快嘛，\n你们这代人的想法跟我们那会儿\n完全不一样了。"\n\n阿姨笑了笑，摆摆手走了。\n\n你站在原地想了很久。\n\n同一件事，不同性别、不同年代的人，\n看到的世界真的不一样。\n\n你以前知道这个道理，\n但今天是第一次"感觉到"。',
+      choices: [
+        { text: '✦ 带着这份感悟回家', next: 'ending_understanding' },
+      ]
+    },
+    to_office: {
+      label: '第 5 幕 — 终章',
+      text: '你来到公司楼下。\n\n透过玻璃门看到自己的倒影——\n一个既熟悉又陌生的自己。\n\n你想起上周在会议室里，\n你随口说过的那些话。\n\n如果是以现在的身份，\n听到那些话，会是什么感受？\n\n你突然意识到，有些玩笑\n其实一点都不好笑。',
+      choices: [
+        { text: '✦ 你把这个感悟记在心里', next: 'ending_empathy' },
+      ]
+    },
+    mystery_text: {
+      label: '第 5 幕 — 终章',
+      text: '你回了一句："你是谁？"\n\n对方秒回：\n"一个也经历过的人。\n\n好好体验，别浪费了。\n\n明天醒来你会感谢今天的。"\n\n你再发消息，已经没有回应了。\n\n你放下手机，看着傍晚的天空。\n\n也许，这是一份礼物。',
+      choices: [
+        { text: '✦ 收下这份礼物', next: 'ending_understanding' },
+      ]
+    },
+    shopping_more: {
+      label: '第 5 幕 — 终章',
+      text: '你提着购物袋走在街上，\n心情是从未有过的轻松。\n\n不是因为买了新衣服，\n而是因为你发现——\n\n原来被允许做不同的自己，\n是一件这么快乐的事。\n\n你希望每个人都能有这样的机会。',
+      choices: [
+        { text: '✦ 带着这份快乐回家', next: 'ending_understanding' },
+      ]
+    },
+    digest_home: {
+      label: '第 5 幕 — 终章',
+      text: '回到家，你坐在沙发上发呆。\n\n今天的一切像一场梦。\n\n你拿起手机，在备忘录里\n写下今天的感受。\n\n写着写着，你发现原来自己有\n这么多话想说，\n原来以前有那么多没注意到的视角。\n\n明天不管变不变回去，\n你都决定做一个更懂得\n换位思考的人。',
+      choices: [
+        { text: '✦ 写完日记，安然入睡', next: 'ending_empathy' },
+      ]
+    },
+    embrace_ending_a: {
+      label: '第 5 幕 — 终章',
+      text: '你决定好好度过剩下的时间。\n\n你去了很多地方，做了很多\n以前不会做的事。\n\n你跟不同的人聊天，听他们的故事。\n\n你发现每个人都有自己的困境，\n而理解——不是靠想象，\n是靠体验。\n\n凌晨，你躺在床上，\n觉得今天虽然奇怪，\n但可能是你收获最多的一天。',
+      choices: [
+        { text: '✦ 闭上眼睛，期待明天', next: 'ending_understanding' },
+      ]
+    },
+    fight_ending_b: {
+      label: '第 5 幕 — 终章',
+      text: '你花了一整天想变回去。\n\n试了各种方法——\n重新下载那个 APP、\n找人帮忙、网上发帖...\n\n但没有用。\n\n傍晚你累倒在床上，\n感到沮丧和无力。\n\n但你同时也明白了一件事——\n\n有些人的困境不是一天，\n而是一辈子。\n\n你只是体验了一天，\n而有些人没有"明天醒来就变回去"\n这个选项。',
+      choices: [
+        { text: '✦ 带着这份沉重但真实的认知睡去', next: 'ending_empathy' },
+      ]
+    },
+
+    ending_understanding: {
+      label: '',
+      text: '✦ ✦ ✦ 故事结束 ✦ ✦ ✦\n\n\n第二天早上你醒来，\n变回了原来的自己。\n\n但你清楚——\n有些东西已经不一样了。\n\n\n「理解不是想象，\n  是穿别人的鞋走一段路。」\n\n\n感谢你的体验。\n\n\n\n—— 角色互换 · 一日体验 ——',
+      choices: []
+    },
+    ending_empathy: {
+      label: '',
+      text: '✦ ✦ ✦ 故事结束 ✦ ✦ ✦\n\n\n第二天早上你醒来，\n看着天花板，想了很久。\n\n你没有变回去。\n是体验还没有结束，\n还是...根本没有"变回去"这回事？\n\n你笑了笑，起床洗漱。\n\n不管怎样，\n你学会了最重要的一课：\n\n\n「真正的理解，\n  始于放下自己。」\n\n\n—— 角色互换 · 一日体验 ——',
+      choices: []
+    }
+  }
+};
+
+function render() {
+  const scene = game.scenes[game.currentScene];
+  document.getElementById('sceneLabel').textContent = scene.label || '';
+  document.getElementById('sceneText').innerHTML = scene.text.replace(/\n/g, '<br>');
+
+  const container = document.getElementById('choices');
+  container.innerHTML = '';
+  scene.choices.forEach((c, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'choice-btn';
+    btn.textContent = c.text;
+    btn.addEventListener('click', () => goTo(c.next));
+    container.appendChild(btn);
+    setTimeout(() => btn.classList.add('fade-in'), i * 100);
+  });
+
+  updateProgress();
+  document.getElementById('restartBtn').style.display =
+    scene.choices.length === 0 ? 'inline-block' : 'none';
+}
+
+function goTo(sceneId) {
+  if (!game.scenes[sceneId]) return;
+  game.history.push(game.currentScene);
+  game.currentScene = sceneId;
+  render();
+}
+
+function updateProgress() {
+  const total = Object.keys(game.scenes).length;
+  const visited = game.history.length + 1;
+  const bar = document.getElementById('progressBar');
+  bar.innerHTML = '';
+  for (let i = 0; i < Math.min(total, 8); i++) {
+    const dot = document.createElement('div');
+    dot.className = 'dot';
+    if (i < game.history.length) dot.classList.add('passed');
+    if (i === game.history.length) dot.classList.add('active');
+    bar.appendChild(dot);
+  }
+}
+
+document.getElementById('restartBtn').addEventListener('click', () => {
+  game.currentScene = 'start';
+  game.history = [];
+  render();
+});
+
+render();
+</script>
+</body>
+</html>

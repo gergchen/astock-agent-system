@@ -3,13 +3,17 @@
 Connect to TDX servers via TCP port 7709. No API key needed.
 """
 
+import logging
+
 import pandas as pd
 from mootdx.quotes import Quotes
 
 from ..config import get_config
+from ..core.cache import cached
 from ..utils.rate_limiter import rate_limit
 from ..utils.retry import retry
-from ..exceptions import MootdxError
+from ..exceptions import DataUnavailableError, MootdxError
+from ..core.datasource_manager import DataSourceManager
 
 # Category mapping: mootdx category code -> human label
 CATEGORY_MAP = {
@@ -167,13 +171,151 @@ def _get_client() -> MootdxClient:
     return _client
 
 
+def _get_sina_kline(code: str, category: str = "day", offset: int = 100) -> pd.DataFrame | None:
+    """Fallback: fetch K-line via Sina finance (akshare stock_zh_a_daily).
+
+    Sina returns data with turnover, works without proxy/VPN.
+    Returns None on failure.
+    """
+    try:
+        import akshare as ak
+
+        prefix = "sh" if str(code).startswith("6") else "sz"
+        df = ak.stock_zh_a_daily(symbol=f"{prefix}{code}")
+        if df is None or df.empty:
+            return None
+
+        df = df.rename(columns={
+            "volume": "vol",
+        })
+        # Sina returns newest first, reverse to oldest-first (mootdx convention)
+        df = df.sort_values("date").reset_index(drop=True)
+
+        # Apply offset: return last N rows
+        if offset and len(df) > offset:
+            df = df.tail(offset).reset_index(drop=True)
+        return df
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("Sina K-line fallback failed", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# DataSourceManager: mootdx TCP → Sina HTTP automatic fallback
+# ---------------------------------------------------------------------------
+_kline_manager: DataSourceManager | None = None
+
+
+def _init_kline_manager() -> DataSourceManager:
+    """Register K-line sources in priority order."""
+    mgr = DataSourceManager()
+
+    def _mootdx_source(code: str, category: str | int = "day", offset: int = 100) -> pd.DataFrame:
+        """Primary: mootdx TCP (supports all periods)."""
+        if isinstance(category, str):
+            cat_int = CATEGORY_FROM_NAME.get(category, 4)
+        else:
+            cat_int = category
+        df = _get_client().bars(symbol=str(code).zfill(6), category=cat_int, offset=offset)
+        if df is None or df.empty:
+            raise MootdxError(f"No K-line data from mootdx for {code}")
+        return df
+
+    def _sina_source(code: str, category: str | int = "day", offset: int = 100) -> pd.DataFrame:
+        """Fallback: Sina HTTP (only day and 15m)."""
+        if isinstance(category, str):
+            cat_name = category
+        else:
+            cat_name = CATEGORY_MAP.get(category, "day")
+        if cat_name not in ("day", "15m"):
+            raise MootdxError(f"Sina fallback does not support category '{cat_name}'")
+        result = _get_sina_kline(code, cat_name, offset)
+        if result is None or result.empty:
+            raise MootdxError(f"No K-line data from Sina for {code}")
+        return result
+
+    mgr.register("mootdx", _mootdx_source, priority=0)
+    mgr.register("sina", _sina_source, priority=1)
+    return mgr
+
+
+def _get_kline_manager() -> DataSourceManager:
+    global _kline_manager
+    if _kline_manager is None:
+        _kline_manager = _init_kline_manager()
+    return _kline_manager
+
+
+@cached(ttl_key="kline_daily")
 def get_kline(code: str, category: str | int = "day", offset: int = 100) -> pd.DataFrame:
-    """Fetch K-line data. category: 'day','week','month','1m','5m','15m','30m','60m' or int 4-11."""
-    if isinstance(category, str):
-        cat_int = CATEGORY_FROM_NAME.get(category, 4)
-    else:
-        cat_int = category
-    return _get_client().bars(symbol=str(code).zfill(6), category=cat_int, offset=offset)
+    """Fetch K-line data. category: 'day','week','month','1m','5m','15m','30m','60m' or int 4-11.
+
+    Auto-fallback: mootdx TCP → Sina HTTP. Cached per kline_daily TTL.
+    """
+    try:
+        return _get_kline_manager().fetch(
+            code,
+            category=category,
+            offset=offset,
+            required_columns=["open", "high", "low", "close", "vol"],
+            positive_columns=["open", "high", "low", "close", "vol"],
+            cross_validate=True,
+        )
+    except DataUnavailableError:
+        return pd.DataFrame()
+
+
+def batch_kline(
+    codes: list[str],
+    category: str = "day",
+    offset: int = 100,
+    max_workers: int = 5,
+) -> dict[str, pd.DataFrame]:
+    """Fetch K-line for multiple stocks in parallel.
+
+    Each stock goes through the normal get_kline() path (mootdx → Sina
+    fallback) independently. ThreadPoolExecutor is used since the bottleneck
+    is network I/O, not CPU.
+
+    Caching applies per-stock — repeated calls with the same codes within
+    TTL window return instantly from cache.
+
+    Args:
+        codes: List of 6-digit stock codes.
+        category: K-line period (default "day").
+        offset: Number of bars per stock (default 100).
+        max_workers: Max concurrent fetches (default 5).
+
+    Returns:
+        Dict mapping code -> DataFrame (empty/failed codes omitted).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    logger = logging.getLogger(__name__)
+    codes = [str(c).zfill(6) for c in codes]
+    results: dict[str, pd.DataFrame] = {}
+
+    logger.info("Fetching K-line for %d stocks (parallel=%d)...", len(codes), max_workers)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(get_kline, code, category, offset): code
+            for code in codes
+        }
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                df = future.result()
+                if df is not None and not df.empty:
+                    results[code] = df
+                else:
+                    logger.warning("No data for %s", code)
+            except Exception as e:
+                logger.error("Failed to fetch %s: %s", code, e)
+
+    logger.info("Fetched %d/%d stocks successfully", len(results), len(codes))
+    return results
 
 
 def get_quotes(codes: list[str]) -> pd.DataFrame:

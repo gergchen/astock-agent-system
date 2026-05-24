@@ -19,6 +19,7 @@ class BacktestMetrics:
     profit_factor: float
     start_value: float
     end_value: float
+    benchmarks: dict | None = None
 
 
 def calculate_metrics(

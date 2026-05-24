@@ -12,6 +12,23 @@ def scan_hotspots() -> list[dict]:
     return get_hot_sectors()
 
 
+def scan_hotspots_detail() -> list[dict]:
+    """Get hot stocks for early signal detection.
+
+    NOTE: ths_hotspot API only returns: 代码, 名称, 题材归因, 市场
+    It does NOT include gain% data. Real-time gains are fetched
+    separately via Tencent Finance in generate_early_signals().
+
+    Returns raw hot stock list with available fields.
+    Empty list if no data available.
+    """
+    from astock_data.signal.ths_hotspot import get_hot_stocks
+    df = get_hot_stocks()
+    if df.empty:
+        return []
+    return df.to_dict(orient="records")
+
+
 def scan_northbound() -> list[dict]:
     df = get_northbound_realtime()
     if df.empty:

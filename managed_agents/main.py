@@ -34,10 +34,15 @@ Agent 决策链回测:
 """
 
 import argparse
+import json
 import logging
+import os
+import subprocess
 import sys
+import tempfile
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -61,6 +66,11 @@ from managed_agents.utils.notifier import notify, sleep_until_next_session
 from managed_agents.config import get_config
 from managed_agents.backtest.engine import DecisionChainBacktester, BacktestConfig, DEFAULT_POOL
 from managed_agents.backtest.report import AttributionReport
+
+# 用户消息去重（同一 chat+文本 5秒内忽略）
+_USER_MSG_DEDUP: dict[str, float] = {}
+_MSG_DEDUP_LOCK = threading.Lock()
+_MSG_DEDUP_WINDOW = 30.0  # 30秒，仅防手滑双击
 
 ALL_AGENT_CLASSES = [Sentinel, MorningAnalyst, ResearcherTrader, DayTrader, RiskOfficer, PortfolioManager]
 
@@ -353,145 +363,167 @@ def cmd_session_history(args):
 # ═══════════════════════════════════════════════════════════════════
 
 def run_feishu_bot():
-    """启动飞书全栈服务 — bot 进站 + 哨兵盯盘 + 调度器定时推送."""
-    from managed_agents.utils.feishu_bot import start_bot, stop_bot
+    """启动飞书全栈服务 — bot 进站 + 哨兵盯盘 + 调度器定时推送.
+
+    Bot 在线 24h 随时回复用户消息；
+    哨兵/调度器 15:05 停服，次日 8:55 自动唤醒，避免盘后空转。
+    """
+    # ── PID 锁文件：防重复启动（原子创建 + tasklist 验证）──
+    this_pid = os.getpid()
+    _pid_file = Path(tempfile.gettempdir()) / "feishu_bot.pid"
+
+    # 已有锁文件 → 检查 PID 是否存活
+    if _pid_file.exists():
+        try:
+            old_pid = int(_pid_file.read_text().strip())
+            r = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {old_pid}", "/NH"],
+                capture_output=True, timeout=5
+            )
+            stdout = r.stdout.decode("gbk", errors="replace").lower()
+            if f"{old_pid}" in stdout and "python" in stdout:
+                print(f"Bot 已在运行 (PID {old_pid})，跳过启动")
+                return
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            pass
+        _pid_file.unlink(missing_ok=True)
+
+    # 原子创建锁文件（'x' 模式：文件已存在则抛 FileExistsError）
+    try:
+        fd = os.open(str(_pid_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.write(fd, str(this_pid).encode())
+        os.close(fd)
+    except FileExistsError:
+        print(f"Bot 已在运行，跳过启动")
+        return
+
+    import atexit
+    atexit.register(lambda: _pid_file.unlink(missing_ok=True))
+
     from managed_agents.api.client import get_client
+    from managed_agents.im.router import MessageRouter
+    from managed_agents.im.feishu_adapter import FeishuAdapter
 
     config = get_config()
     logger.info("启动飞书全栈服务...")
 
+    # ── IM 路由器（统一消息通道，后续加微信/钉钉只在此注册）──
+    router = MessageRouter()
+    feishu = FeishuAdapter(config.feishu_app_id, config.feishu_app_secret)
+    router.register(feishu)
+    logger.info(f"IM 路由器就绪，平台: {router.platforms}")
+
     # ── 1. 调度器（定时任务：盘前/盘中/盘后）──
+    def _start_scheduler():
+        scheduler = None
+        try:
+            _setup(all_agents=True)
+            from managed_agents.orchestra.scheduler import Scheduler
+            from managed_agents.coordinator.coordinator import Coordinator
+            coordinator = Coordinator.get_instance()
+            for agent_cls in ALL_AGENT_CLASSES:
+                try:
+                    coordinator.register_agent(agent_cls())
+                except Exception as e:
+                    logger.warning(f"注册 {agent_cls.__name__} 失败: {e}")
+            scheduler = Scheduler(coordinator)
+            scheduler.start()
+            logger.info("调度器已启动")
+        except Exception as e:
+            logger.warning(f"调度器启动失败: {e}")
+        return scheduler
+
+    # ── 2. 哨兵线程 ──
+    _sentinel_running = False
+    _sentinel_thread = None
+
+    def _start_sentinel():
+        nonlocal _sentinel_running, _sentinel_thread
+        try:
+            sentinel = Sentinel()
+            _sentinel_running = True
+
+            def loop():
+                while _sentinel_running:
+                    try:
+                        result = sentinel.scan()
+                        for alert in result.get("alerts", []):
+                            level = {"普通": "info", "关注": "warn", "紧急": "alert"}.get(alert["level"], "info")
+                            notify(alert["title"], alert.get("detail", ""), level)
+                    except Exception as e:
+                        logger.warning(f"哨兵扫描异常: {e}")
+                    if Sentinel._is_trading_time():
+                        time.sleep(config.sentinel_scan_interval)
+                    else:
+                        s = sleep_until_next_session()
+                        if s > 0:
+                            logger.info(f"哨兵盘后休眠 {s/3600:.1f}h")
+                            time.sleep(s)
+                        else:
+                            time.sleep(config.sentinel_scan_interval)
+
+            _sentinel_thread = threading.Thread(target=loop, daemon=True)
+            _sentinel_thread.start()
+            notify("哨兵上线", f"扫描间隔 {config.sentinel_scan_interval} 秒", "info")
+            logger.info("哨兵已启动")
+        except Exception as e:
+            logger.warning(f"哨兵启动失败: {e}")
+
+    def _stop_sentinel():
+        nonlocal _sentinel_running
+        _sentinel_running = False
+
+    # ── 3. 消息处理器（路由 / 上下文 / 历史 / 记忆）──
+    from managed_agents.im.trader_handler import TraderHandler
+    llm = get_client()
+    handler = TraderHandler(llm)
+
+    # ── 启动 Bot（24h 在线，永不停止）──
+    router.set_route_fn(lambda msg: handler.handle_message(msg.chat_id, msg.text, msg.chat_type))
+    router.start_all()
+    logger.info("飞书全栈服务运行中，Ctrl+C 退出")
+
+    # ── 日间循环：调度器+哨兵每天重启，bot 始终在线 ──
     scheduler = None
     try:
-        _setup(all_agents=True)
-        from managed_agents.orchestra.scheduler import Scheduler
-        from managed_agents.coordinator.coordinator import Coordinator
-        coordinator = Coordinator.get_instance()
-        for agent_cls in ALL_AGENT_CLASSES:
-            try:
-                coordinator.register_agent(agent_cls())
-            except Exception as e:
-                logger.warning(f"注册 {agent_cls.__name__} 失败: {e}")
-        scheduler = Scheduler(coordinator)
-        scheduler.start()
-        logger.info("调度器已启动")
-    except Exception as e:
-        logger.warning(f"调度器启动失败: {e}")
-
-    # ── 2. 哨兵（实时盯盘）──
-    sentinel = None
-    try:
-        sentinel = Sentinel()
-        import threading
-        sentinel_running = True
-
-        def sentinel_loop():
-            while sentinel_running:
-                try:
-                    result = sentinel.scan()
-                    for alert in result.get("alerts", []):
-                        level = {"普通": "info", "关注": "warn", "紧急": "alert"}.get(alert["level"], "info")
-                        notify(alert["title"], alert.get("detail", ""), level)
-                except Exception as e:
-                    logger.warning(f"哨兵扫描异常: {e}")
-                # 盘后深度休眠到次日盘前，零 API/Token 消耗
-                if Sentinel._is_trading_time():
-                    time.sleep(config.sentinel_scan_interval)
-                else:
-                    s = sleep_until_next_session()
-                    if s > 0:
-                        logger.info(f"哨兵盘后休眠 {s/3600:.1f}h")
-                        time.sleep(s)
-                    else:
-                        time.sleep(config.sentinel_scan_interval)
-
-        sentinel_thread = threading.Thread(target=sentinel_loop, daemon=True)
-        sentinel_thread.start()
-        notify("哨兵上线", f"扫描间隔 {config.sentinel_scan_interval} 秒", "info")
-        logger.info("哨兵已启动")
-    except Exception as e:
-        logger.warning(f"哨兵启动失败: {e}")
-
-    # ── 3. 飞书 bot 进站（接收消息 + 实时数据 + LLM 回复）──
-    llm = get_client()
-    from managed_agents.skills.market_skills import MarketSkills
-    from managed_agents.skills.news_skills import NewsSkills
-
-    markets = MarketSkills()
-    news = NewsSkills()
-
-    def handle_message(chat_id: str, user_text: str) -> str | None:
-        try:
-            # 注入实时行情数据到 LLM 上下文
-            data_context = ""
-            try:
-                h = markets.get_sector_hotspots()
-                sectors = h.get("sectors", [])[:5]
-                data_context += "实时热点前5: " + ", ".join(
-                    f"{s['name']}({s['count']}股涨停)" for s in sectors
-                ) + "\n"
-            except Exception:
-                pass
-
-            # 热点个股列表
-            try:
-                hs = markets.get_hotspots()
-                stocks = hs.get("top_stocks", [])[:12]
-                if stocks:
-                    data_context += "强势个股:\n" + "\n".join(
-                        f"• {s['code']} {s['name']} 题材:{s.get('reason','')[:20]}"
-                        for s in stocks
-                    ) + "\n"
-            except Exception:
-                pass
-
-            try:
-                nb = markets.get_northbound()
-                data_context += f"北向资金: 沪股通{nb.get('latest_hgt',0):+.1f}亿 深股通{nb.get('latest_sgt',0):+.1f}亿 合计{nb.get('total',0):+.1f}亿 最新时间{nb.get('latest_time','')}\n"
-            except Exception:
-                pass
-            try:
-                n = news.get_flash_news(limit=5)
-                lines = []
-                for item in n.get("news", []):
-                    t = item.get("title") or item.get("content", "")[:40]
-                    if t.strip():
-                        lines.append(f"• {t}")
-                if lines:
-                    data_context += "最新快讯:\n" + "\n".join(lines[:3]) + "\n"
-            except Exception:
-                pass
-
-            prompt = (
-                "你是A股交易助手，回复必须遵守以下规则：\n"
-                "1. 只回答用户明确问的问题，不要主动推荐个股\n"
-                "2. 回复不超过2句话，直接给结论\n"
-                "3. 用户没问行情/个股，就不要列数据\n"
-                "以下是可以参考的实时数据（可选使用）：\n\n"
-                f"{data_context}\n"
-                f"用户消息：{user_text}"
-            )
-            resp = llm.call([{"role": "user", "content": prompt}])
-            return f"[台式机] {resp[:8000]}"
-        except Exception as e:
-            logger.error(f"LLM 回复失败: {e}")
-            return "系统繁忙，请稍后再试"
-
-    start_bot(config.feishu_app_id, config.feishu_app_secret, handle_message)
-
-    logger.info("飞书全栈服务运行中，Ctrl+C 退出")
-    try:
         while True:
-            time.sleep(1)
+            now = datetime.now()
+            # 交易日盘中 → 启动调度器 + 哨兵
+            if now.weekday() < 5 and dt_time(9, 0) <= now.time() < dt_time(15, 5):
+                if scheduler is None:
+                    scheduler = _start_scheduler()
+                    _start_sentinel()
+                time.sleep(15)
+            # 盘后（15:05+）→ 停调度器 + 哨兵，深度休眠
+            elif now.weekday() < 5 and now.time() >= dt_time(15, 5):
+                if scheduler is not None:
+                    scheduler.stop()
+                    scheduler = None
+                    _stop_sentinel()
+                    notify("哨兵+调度器已停止", "盘后自动关闭，次日 8:55 唤醒", "info")
+                    logger.info("盘后停服，bot 仍在线可回复消息")
+                s = sleep_until_next_session()
+                if s > 0:
+                    logger.info(f"距下次开盘还有 {s/3600:.1f}h，深度休眠中")
+                    time.sleep(s)
+            # 非交易日 → 直接深度休眠
+            else:
+                if scheduler is not None:
+                    scheduler.stop()
+                    scheduler = None
+                    _stop_sentinel()
+                s = sleep_until_next_session()
+                if s > 0:
+                    logger.info(f"非交易日，休眠 {s/3600:.1f}h 至下次开盘")
+                    time.sleep(s)
+
     except KeyboardInterrupt:
-        stop_bot()
-        if scheduler:
-            scheduler.stop()
-        if sentinel:
-            sentinel_running = False
-        notify("飞书全栈下线", "bot + 哨兵 + 调度器已停止", "info", force=True)
-        logger.info("飞书全栈已退出")
-        logger.info("飞书机器人已退出")
+        pass
+
+    # 用户 Ctrl+C 退出时才停 bot
+    router.stop_all()
+    notify("飞书全栈下线", "bot 已停止", "info", force=True)
+    logger.info("飞书全栈已退出")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -585,6 +617,129 @@ def cmd_backtest(args):
             report.steps[name] = ChainStepResult(**step)
         report.print()
 
+def cmd_feishu_send(args):
+    """发送飞书消息。"""
+    from managed_agents.utils.feishu_bot import send_message
+    config = get_config()
+    ok = send_message(args.chat_id, args.text, config.feishu_app_id, config.feishu_app_secret)
+    if ok:
+        print(f"已发送到 {args.chat_id}")
+    else:
+        print("发送失败")
+        sys.exit(1)
+
+
+def cmd_claude_poll(args):
+    """查看 Claude 收件箱中待处理的消息。"""
+    inbox_dir = Path(__file__).parent.parent / "managed_agents_data" / "claude_inbox"
+    if not inbox_dir.exists():
+        print("收件箱为空")
+        return
+
+    files = sorted(inbox_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        print("收件箱为空")
+        return
+
+    print(f"Claude 收件箱 ({len(files)} 条待处理):\n")
+    for f in files:
+        msg = json.loads(f.read_text(encoding="utf-8"))
+        from datetime import datetime as _dt
+        ts = _dt.fromtimestamp(msg["time"]).strftime("%m-%d %H:%M:%S")
+        print(f"  [{ts}] {f.stem}")
+        print(f"  Chat: {msg['chat_id']}")
+        print(f"  内容: {msg['text'][:200]}")
+        print()
+
+
+def cmd_claude_process(args):
+    """处理 Claude 收件箱中的消息并通过飞书回复。"""
+    from managed_agents.utils.feishu_bot import send_message
+    config = get_config()
+    inbox_dir = Path(__file__).parent.parent / "managed_agents_data" / "claude_inbox"
+    if not inbox_dir.exists():
+        print("收件箱为空")
+        return
+
+    files = sorted(inbox_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        print("收件箱为空")
+        return
+
+    print(f"Claude 收件箱 ({len(files)} 条待处理):\n")
+    for f in files:
+        msg = json.loads(f.read_text(encoding="utf-8"))
+        from datetime import datetime as _dt
+        ts = _dt.fromtimestamp(msg["time"]).strftime("%m-%d %H:%M:%S")
+        print(f"  {'='*50}")
+        print(f"  [{ts}] ID: {f.stem}")
+        print(f"  Chat: {msg['chat_id']}")
+        print(f"  内容: {msg['text']}")
+        print()
+
+    print(f"\n使用以下命令回复:")
+    print(f"  python -m managed_agents.main feishu-send <chat_id> \"回复内容\"")
+    print(f"  或直接回复指定消息:")
+    print(f"  python -m managed_agents.main claude-respond <msg_id> \"回复内容\"")
+    print(f"  回复后删除对应文件: rm {inbox_dir}/<msg_id>.json")
+
+
+def cmd_claude_respond(args):
+    """回复指定收件箱消息并删除待处理文件。"""
+    from managed_agents.utils.feishu_bot import send_message
+    config = get_config()
+    inbox_dir = Path(__file__).parent.parent / "managed_agents_data" / "claude_inbox"
+    msg_file = inbox_dir / f"{args.msg_id}.json"
+    if not msg_file.exists():
+        print(f"消息 {args.msg_id} 不存在")
+        sys.exit(1)
+
+    msg = json.loads(msg_file.read_text(encoding="utf-8"))
+    ok = send_message(msg["chat_id"], args.text, config.feishu_app_id, config.feishu_app_secret)
+    if ok:
+        msg_file.unlink()
+        print(f"✓ 已回复并删除 {args.msg_id}.json")
+    else:
+        print("发送失败，文件保留")
+        sys.exit(1)
+
+# ═══════════════════════════════════════════════════════════════════
+# Douyin Monitor
+# ═══════════════════════════════════════════════════════════════════
+
+def cmd_douyin(args):
+    from managed_agents.douyin.crawler import DouyinCrawler
+    from managed_agents.douyin.api_client import DouyinAPI
+    from managed_agents.skills.douyin_skills import DouyinSkills
+
+    if args.douyin_cmd == "monitor":
+        api = DouyinAPI()
+        if not api.health_check():
+            print("Douyin API 不可达, 请确认服务已启动 (远端的 http://<server>:8000 或本地的端口映射)")
+            sys.exit(1)
+        crawler = DouyinCrawler(api)
+        crawler.run_forever(args.interval or None)
+
+    elif args.douyin_cmd == "scan-user":
+        skills = DouyinSkills()
+        print(skills.scan_user(args.sec_user_id, args.nickname))
+
+    elif args.douyin_cmd == "analyze-video":
+        skills = DouyinSkills()
+        print(skills.analyze_video(args.url))
+
+    elif args.douyin_cmd == "list":
+        skills = DouyinSkills()
+        print(skills.list_users())
+
+    elif args.douyin_cmd == "user-info":
+        skills = DouyinSkills()
+        print(skills.get_user_info(args.sec_user_id))
+
+    else:
+        print("未知命令. 可用: monitor, scan-user, analyze-video, list, user-info")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Managed Agents for A-Stock")
     sub = parser.add_subparsers(dest="command")
@@ -595,6 +750,18 @@ def main():
 
     # --- feishu ---
     sub.add_parser("feishu", help="启动飞书机器人（双向消息）")
+
+    # --- claude inbox ---
+    sub.add_parser("claude-poll", help="查看 Claude 收件箱待处理消息")
+    sub.add_parser("claude-process", help="查看收件箱中所有消息（含回复指引）")
+    claude_respond = sub.add_parser("claude-respond", help="回复收件箱消息")
+    claude_respond.add_argument("msg_id", help="消息 ID（文件名不含 .json）")
+    claude_respond.add_argument("text", help="回复内容")
+
+    # --- feishu send ---
+    feishu_send = sub.add_parser("feishu-send", help="发送飞书消息")
+    feishu_send.add_argument("chat_id", help="目标群聊/用户 chat_id")
+    feishu_send.add_argument("text", help="消息内容")
 
     # --- researcher ---
     researcher_parser = sub.add_parser("researcher", help="研究员分析")
@@ -641,6 +808,20 @@ def main():
     mem_search = mem_sub.add_parser("search", help="搜索记忆")
     mem_search.add_argument("query", help="搜索关键词")
 
+    # --- douyin monitor ---
+    dy_parser = sub.add_parser("douyin", help="抖音带货监控")
+    dy_sub = dy_parser.add_subparsers(dest="douyin_cmd")
+    dy_sub.add_parser("monitor", help="启动抖音监控轮询").add_argument(
+        "--interval", type=int, default=0, help="轮询间隔(秒), 默认使用配置值")
+    dy_scan = dy_sub.add_parser("scan-user", help="扫描指定用户")
+    dy_scan.add_argument("sec_user_id", help="抖音用户 sec_user_id")
+    dy_scan.add_argument("--nickname", "-n", default="", help="用户昵称")
+    dy_analyze = dy_sub.add_parser("analyze-video", help="分析单个视频")
+    dy_analyze.add_argument("url", help="抖音分享链接")
+    dy_sub.add_parser("list", help="列出监控用户")
+    dy_info = dy_sub.add_parser("user-info", help="获取用户信息")
+    dy_info.add_argument("sec_user_id", help="抖音用户 sec_user_id")
+
     # --- session ---
     session_parser = sub.add_parser("session", help="Session 管理")
     session_sub = session_parser.add_subparsers(dest="session_cmd")
@@ -673,6 +854,18 @@ def main():
     elif args.command == "feishu":
         run_feishu_bot()
 
+    elif args.command == "claude-poll":
+        cmd_claude_poll(args)
+
+    elif args.command == "claude-process":
+        cmd_claude_process(args)
+
+    elif args.command == "claude-respond":
+        cmd_claude_respond(args)
+
+    elif args.command == "feishu-send":
+        cmd_feishu_send(args)
+
     elif args.command == "researcher":
         cmd_researcher(args)
 
@@ -703,6 +896,9 @@ def main():
             cmd_session_history(args)
         else:
             session_parser.print_help()
+
+    elif args.command == "douyin":
+        cmd_douyin(args)
 
     else:
         parser.print_help()

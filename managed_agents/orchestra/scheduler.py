@@ -22,6 +22,24 @@ from ..utils.notifier import notify, sleep_until_next_session
 
 logger = get_logger(__name__)
 
+# 无效题材关键词 — 过滤无意义分类
+_SKIP_SECTORS = {"其他", "其它", "其他板块", "", "综合"}
+
+def _filter_hotspots(hotspots: list[dict]) -> list[dict]:
+    """过滤掉无效题材类别."""
+    return [h for h in hotspots if h.get("sector", "").strip() not in _SKIP_SECTORS]
+
+_MIN_CONFIDENCE = 0.55  # 相当于≥3只涨停股的板块
+
+def _filter_signals(signals: list[dict]) -> list[dict]:
+    """过滤：只保留买入且置信度达标的信号."""
+    return [
+        s for s in signals
+        if s.get("direction") == "BUY"
+        and s.get("confidence", 0) >= _MIN_CONFIDENCE
+        and s.get("sector", "").strip() not in _SKIP_SECTORS
+    ]
+
 # 交易时段定义
 TRADING_SCHEDULE = {
     "pre_market": (dt_time(9, 0), dt_time(9, 25)),
@@ -154,7 +172,7 @@ class Scheduler:
             logger.error(f"Scheduled task error [{period}]: {e}")
 
     def _execute_pre_market(self) -> None:
-        """盘前: 复盘昨日 + 今晨简报 + 仓位规划，合并推送."""
+        """盘前: 复盘 + 外围市场 + 题材 + 个股推荐 + 交易策略，合并推送."""
         parts = []
 
         # 1. 昨日复盘
@@ -162,47 +180,130 @@ class Scheduler:
             pm = self._registry.get("portfolio-manager")
             recap = pm.post_market_recap()
             if recap.get("success") and recap.get("recap"):
-                parts.append(f"【昨日复盘】\n{recap['recap'][:300]}")
+                parts.append(f"📊 昨日复盘\n{recap['recap'][:300]}")
         except KeyError:
             pass
 
-        # 2. 今晨简报
+        # 2. 今晨简报（含外围市场、重磅消息、今日关注）
         try:
             analyst = self._registry.get("morning-analyst")
             r = analyst.generate_briefing()
             if r.get("success") and r.get("briefing"):
-                parts.append(f"【今日简报】\n{r['briefing'][:400]}")
+                parts.append(f"🌙 外围市场 & 盘前简报\n{r['briefing'][:500]}")
         except KeyError:
             pass
 
-        # 3. 仓位规划
-        try:
-            pm = self._registry.get("portfolio-manager")
-            plan = pm.pre_market_plan()
-            if plan.get("success") and plan.get("plan"):
-                parts.append(f"【仓位规划】\n{plan['plan'][:200]}")
-        except KeyError:
-            pass
-
-        if parts:
-            notify("盘前汇总", "\n\n".join(parts), "info", force=True)
-
-    def _execute_session_scan(self) -> None:
-        """盘中: ResearcherTrader 扫描 + 信号生成."""
+        # 3. 研究员题材扫描 + 个股推荐 + 交易策略
         try:
             researcher = self._registry.get("researcher-trader")
             r = researcher.scan_and_generate()
             signals = r.get("signals", [])
+            hotspots = _filter_hotspots(r.get("scan", {}).get("hotspots", []))
 
-            if signals:
-                # 有信号 → 触发风控审查
+            # 题材热点
+            if hotspots:
+                sector_lines = [f"  · {h['sector']}({h.get('count',0)}股)" for h in hotspots[:5]]
+                parts.append(f"🔥 今日题材\n" + "\n".join(sector_lines))
+
+            # 早期信号（尚未封板，可操作）
+            early_signals = r.get("early_signals", [])
+            buy_early = [s for s in early_signals
+                         if s.get("direction") == "BUY" and s.get("confidence", 0) >= _MIN_CONFIDENCE]
+            if buy_early:
+                early_lines = []
+                for sig in buy_early[:3]:
+                    sector = sig.get("sector", "")
+                    conf = sig.get("confidence", 0)
+                    stocks = sig.get("actionable_stocks", [])
+                    stock_str = "  ".join(f"{s['name']}+{s['gain']}%" for s in stocks[:3])
+                    early_lines.append(f"  🟢 {sector} 置信度{conf:.0%}")
+                    early_lines.append(f"     {stock_str}")
+                parts.append(f"📈 今日关注\n" + "\n".join(early_lines))
+
+            # 原买入信号（已涨停板块，仅作参考）
+            buy_signals = _filter_signals(signals)
+            if buy_signals and not buy_early:
+                rec_lines = []
+                for sig in buy_signals[:5]:
+                    sector = sig.get("sector", "")
+                    conf = sig.get("confidence", 0)
+                    count = sig.get("count", 0)
+                    rec_lines.append(f"  🟡 {sector} 置信度{conf:.0%} ({count}只涨停)")
+                parts.append(f"📈 强势板块\n" + "\n".join(rec_lines))
+
+            # 交易策略（直接让LLM生成策略）
+            if hotspots or signals:
+                try:
+                    from managed_agents.api.client import get_client
+                    llm = get_client()
+                    hs_text = "\n".join(f"{h['sector']}: {h.get('reason','')[:100]}" for h in hotspots[:5])
+                    strategy_prompt = f"基于今日热点题材，给出一份简洁的交易策略（50字以内）：\n{hs_text}"
+                    strategy = llm.call([{"role": "user", "content": strategy_prompt}])
+                    if strategy:
+                        parts.append(f"📝 交易策略\n{strategy[:200]}")
+                except Exception:
+                    pass
+        except KeyError:
+            pass
+
+        # 4. 仓位规划
+        try:
+            pm = self._registry.get("portfolio-manager")
+            plan = pm.pre_market_plan()
+            if plan.get("success") and plan.get("plan"):
+                parts.append(f"💼 仓位规划\n{plan['plan'][:200]}")
+        except KeyError:
+            pass
+
+        if parts:
+            notify("📋 盘前汇总", "\n\n".join(parts), "info", force=True)
+
+    def _execute_session_scan(self) -> None:
+        """盘中: ResearcherTrader 扫描 + 信号生成 + 飞书推送."""
+        try:
+            researcher = self._registry.get("researcher-trader")
+            r = researcher.scan_and_generate()
+            signals = r.get("signals", [])
+            early_signals = r.get("early_signals", [])
+            hotspots = _filter_hotspots(r.get("scan", {}).get("hotspots", []))
+
+            # ── 推送早期机会（尚未封板的个股，可操作）──
+            pushed_early = False
+            if early_signals:
+                buy_early = [s for s in early_signals
+                             if s.get("direction") == "BUY" and s.get("confidence", 0) >= _MIN_CONFIDENCE]
+                if buy_early:
+                    lines = [f"⚡ 盘中机会:"]
+                    for sig in buy_early[:3]:
+                        sector = sig.get("sector", "")
+                        conf = sig.get("confidence", 0)
+                        stocks = sig.get("actionable_stocks", [])
+                        stock_str = "  ".join(f"{s['name']}+{s['gain']}%" for s in stocks[:3])
+                        lines.append(f"  🟢 {sector} 置信度{conf:.0%}")
+                        lines.append(f"     {stock_str}")
+                    notify("盘中机会", "\n".join(lines), "warn", force=True)
+                    pushed_early = True
+                    logger.info(f"推送早期机会: {len(buy_early)}个板块")
+
+            # ── 原已涨停板块信号（仅在没有早期机会时推送）──
+            if signals and not pushed_early:
+                buy_signals = _filter_signals(signals)
+                if buy_signals:
+                    lines = [f"📈 强势板块:"]
+                    for sig in buy_signals[:5]:
+                        sector = sig.get("sector", "")
+                        conf = sig.get("confidence", 0)
+                        count = sig.get("count", 0)
+                        lines.append(f"  🟡 {sector} {conf:.0%} ({count}只涨停)")
+                    notify("盘中机会", "\n".join(lines), "warn", force=True)
+
+            # 有早期信号 → 触发风控审查 + 交易执行
+            if early_signals:
                 try:
                     risk = self._registry.get("risk-officer")
                     risk.review_pending()
                 except KeyError:
                     pass
-
-                # 触发交易员执行
                 try:
                     trader = self._registry.get("day-trader")
                     trader.execute_pending()
@@ -210,10 +311,9 @@ class Scheduler:
                     pass
 
             # 发送心跳
-            hotspots = r.get("scan", {}).get("hotspots", [])
             top_sectors = [h["sector"] for h in hotspots[:3]]
             if top_sectors:
-                logger.info(f"TOP3板块: {', '.join(top_sectors)} | 信号: {len(signals)}个")
+                logger.info(f"TOP3板块: {', '.join(top_sectors)} | 信号: {len(signals)}个 | 早期: {len(early_signals)}个")
         except KeyError:
             pass
 

@@ -77,12 +77,13 @@ class BacktestResult:
             "avg_loss_pct": self.metrics.avg_loss_pct,
             "profit_factor": self.metrics.profit_factor,
         }
-        for bm_name, bm in self.metrics.benchmarks.items():
-            d[f"bm_{bm_name}_return"] = bm.benchmark_return_pct
-            d[f"bm_{bm_name}_excess"] = bm.excess_return_pct
-            d[f"bm_{bm_name}_alpha"] = bm.alpha
-            d[f"bm_{bm_name}_beta"] = bm.beta
-            d[f"bm_{bm_name}_ir"] = bm.information_ratio
+        if self.metrics.benchmarks:
+            for bm_name, bm in self.metrics.benchmarks.items():
+                d[f"bm_{bm_name}_return"] = bm.benchmark_return_pct
+                d[f"bm_{bm_name}_excess"] = bm.excess_return_pct
+                d[f"bm_{bm_name}_alpha"] = bm.alpha
+                d[f"bm_{bm_name}_beta"] = bm.beta
+                d[f"bm_{bm_name}_ir"] = bm.information_ratio
         return d
 
     def report(self) -> str:
@@ -110,18 +111,19 @@ class BacktestResult:
         ]
 
         # Benchmark section
-        for bm_name, bm in m.benchmarks.items():
-            lines.extend([
-                f"  ── {bm_name} 基准对比 ──",
-                f"  基准收益:    {bm.benchmark_return_pct:>+11.2f}%",
-                f"  超额收益:    {bm.excess_return_pct:>+11.2f}%",
-                f"  Alpha(年化): {bm.alpha:>+11.2f}%",
-                f"  Beta:         {bm.beta:>12.3f}",
-                f"  信息比率:    {bm.information_ratio:>12.2f}",
-                f"  跟踪误差:    {bm.tracking_error_pct:>11.2f}%",
-                f"  上行捕获:    {bm.capture_up_pct:>11.1f}%",
-                f"  下行捕获:    {bm.capture_down_pct:>11.1f}%",
-            ])
+        if m.benchmarks:
+            for bm_name, bm in m.benchmarks.items():
+                lines.extend([
+                    f"  ── {bm_name} 基准对比 ──",
+                    f"  基准收益:    {bm.benchmark_return_pct:>+11.2f}%",
+                    f"  超额收益:    {bm.excess_return_pct:>+11.2f}%",
+                    f"  Alpha(年化): {bm.alpha:>+11.2f}%",
+                    f"  Beta:         {bm.beta:>12.3f}",
+                    f"  信息比率:    {bm.information_ratio:>12.2f}",
+                    f"  跟踪误差:    {bm.tracking_error_pct:>11.2f}%",
+                    f"  上行捕获:    {bm.capture_up_pct:>11.1f}%",
+                    f"  下行捕获:    {bm.capture_down_pct:>11.1f}%",
+                ])
 
         lines.append(f"{'='*56}")
         return "\n".join(lines)
@@ -156,6 +158,8 @@ class BacktestEngine:
         max_total_exposure: float = 0.70,
         single_trade_pct: float = 0.20,
         data_dir: str | Path = "data/backtest",
+        # Cache TTL: CSV cache files older than this (seconds) are re-fetched
+        cache_ttl: int = 86400,
         # Benchmark
         benchmark: str | list[str] | None = None,
     ):
@@ -165,6 +169,7 @@ class BacktestEngine:
         self.single_trade_pct = single_trade_pct  # 单笔占比上限, 高股价时按最小一手处理
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_ttl = cache_ttl
 
         # Slippage model: prefer explicit model, fall back to legacy pct
         if slippage_model is not None:
@@ -244,12 +249,17 @@ class BacktestEngine:
 
     def _load_data(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         """Load K-line data from mootdx or local cache."""
+        import time
+
         cache_file = self.data_dir / f"{symbol}_{start}_{end}.csv"
 
         if cache_file.exists():
-            df = pd.read_csv(cache_file)
-            if not df.empty:
-                return df
+            age = time.time() - cache_file.stat().st_mtime
+            if age <= self.cache_ttl:
+                df = pd.read_csv(cache_file)
+                if not df.empty:
+                    return df
+            # TTL expired or data empty — re-fetch below
 
         # Try mootdx
         try:
@@ -268,7 +278,7 @@ class BacktestEngine:
         except Exception:
             pass
 
-        # Try akshare
+        # Try akshare eastmoney (may be blocked in some regions)
         try:
             import akshare as ak
 
@@ -280,6 +290,27 @@ class BacktestEngine:
                     "日期": "date", "开盘": "open", "收盘": "close",
                     "最高": "high", "最低": "low", "成交量": "vol", "成交额": "amount",
                 })
+                df.to_csv(cache_file, index=False)
+                return df
+        except Exception:
+            pass
+
+        # Try akshare sina (more widely accessible)
+        try:
+            import akshare as ak
+
+            prefix = "sh" if str(symbol).startswith("6") else "sz"
+            df = ak.stock_zh_a_daily(
+                symbol=f"{prefix}{symbol}",
+                start_date="",
+                end_date="",
+            )
+            if df is not None and not df.empty:
+                df = df.rename(columns={
+                    "date": "date", "open": "open", "close": "close",
+                    "high": "high", "low": "low", "volume": "vol", "amount": "amount",
+                })
+                df = df.sort_values("date").reset_index(drop=True)
                 df.to_csv(cache_file, index=False)
                 return df
         except Exception:
@@ -355,7 +386,7 @@ class BacktestEngine:
         # Index signals by date
         sig_by_date: dict[str, list[dict]] = {}
         for s in signals:
-            d = s["date"]
+            d = str(s["date"])[:10] if not isinstance(s["date"], str) else s["date"][:10]
             sig_by_date.setdefault(d, []).append(s)
 
         trades: list[dict] = []
@@ -583,6 +614,8 @@ class BacktestEngine:
                     benchmark_name=bm_name,
                     benchmark_df=bm_df if not bm_df.empty else None,
                 )
+                if metrics.benchmarks is None:
+                    metrics.benchmarks = {}
                 metrics.benchmarks[bm_name] = bm_metrics
             except Exception:
                 pass

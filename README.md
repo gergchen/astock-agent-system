@@ -1,217 +1,276 @@
-# A股多Agent交易系统 | A-Stock Multi-Agent Trading System
+# 魔兽 — A股多智能体交易系统
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-
-全栈自动化 A 股交易平台 — 哨兵盯盘 + 回测引擎 + 确定性风控 + 多Agent编排。
-Full-stack automated A-share trading platform — sentinel monitoring, backtesting engine, deterministic risk control, multi-agent orchestration.
+基于 LLM 多 Agent 协作的 A 股全自动交易系统。覆盖盘前分析 → 盘中监控 → 信号生成 → 风控审批 → 交易执行 → 盘后复盘全链路，通过飞书推送消息，用自然语言交互。
 
 ---
 
-## 架构 | Architecture
+## 使用步骤
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Agent Layer (managed_agents)                                     │
-│  sentinel(哨兵) → researcher(研究员) → risk-officer(风控官)       │
-│  → day-trader(交易员) → portfolio-manager(操盘手)                 │
-│  coordinator(编排器, 指数退避重试) / scheduler(时段调度)           │
-│  notifier(推送) / api(FastAPI 多租户)                              │
-├──────────────────────────────────────────────────────────────────┤
-│  Trading Layer (astock_trade)                                     │
-│  risk_engine(熔断/硬限制/软限制+审计) / signal_bus(SQLite WAL)    │
-│  backtest(滑点/佣金/基准/6种策略) / monitor(7子系统健康检查)      │
-├──────────────────────────────────────────────────────────────────┤
-│  Data Layer (astock_data)                                         │
-│  mootdx + 腾讯 + akshare + 同花顺 + 财联社                       │
-│  行情/热点/北向/研报/快讯/公告/财务                               │
-└──────────────────────────────────────────────────────────────────┘
+### 第一步：配置环境
+
+在 `魔兽/.env` 中填入以下凭证：
+
+```ini
+# LLM API（选择 DeepSeek 或 Anthropic）
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+ANTHROPIC_AUTH_TOKEN=sk-your-key-here
+
+# 飞书应用凭证（用于 Bot 收发消息 + 推送通知）
+FEISHU_APP_ID=cli_xxxxxxxxxxxx
+FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
+FEISHU_CHAT_ID=oc_xxxxxxxxxxxx        # 推送目标群 ID
 ```
 
-## 快速开始 | Quick Start
+> 如果只有 Webhook（无 Bot 凭证），可只配 `FEISHU_WEBHOOK_URL`，但 Bot 的交互式回复功能不可用。
+
+### 第二步：安装依赖
 
 ```bash
-# 安装 | Install
-pip install -r requirements.txt
+cd 魔兽
+
+# 安装项目自身（推荐可编辑模式）
 pip install -e .
-
-# 系统状态 | System status
-python -m astock_trade.cli status
-python -m astock_trade.cli status --health     # 7个子系统健康检查
-
-# 数据工具 | Data tools
-python -m astock_data.cli signal hotspot --sectors    # 热点板块
-python -m astock_data.cli signal northbound            # 北向资金
-python -m astock_data.cli news flash -n 10             # 最新快讯
-
-# 回测 | Backtesting
-python -m astock_trade.cli backtest run 600519 -s ma_crossover --cash 100000
-python -m astock_trade.cli backtest run 600519 -s ma_crossover --benchmark 000300
-python -m astock_trade.cli backtest compare 600519    # 多策略对比
-python -m astock_trade.cli backtest batch 600519 002230 -s triple_filter
-
-# 哨兵盯盘 | Sentinel monitoring
-python -m managed_agents.main sentinel --interval 60
 ```
 
-## CLI 界面 | CLI Interface
-
-所有命令支持 `--json` / `-j` 参数输出机器可读格式。
-All commands support `--json` / `-j` for machine-readable output.
-
-**状态仪表盘 | Status Dashboard**
-```bash
-python -m astock_trade.cli status -H
-```
-彩色双栏布局：左侧系统概览（密钥/策略/自选股），右侧运行状态（健康检查/告警）。
-Two-column color layout: left panel (overview), right panel (health checks + alerts).
-
-**回测报告 | Backtest Report**
-```bash
-python -m astock_trade.cli backtest run 600519 -s triple_filter --benchmark 000300
-```
-彩色面板：绿色正值/红色负值/黄色回撤，含基准对比（Alpha/Beta/IR）。
-Color-coded panel: green for gains, red for losses, yellow for drawdowns, benchmark comparison included.
-
-**交易记录 | Trade Journal**
-```bash
-python -m astock_trade.cli journal query --start 2026-05-01 --end 2026-05-15
-```
-表格输出：盈亏列自动颜色编码（绿盈红亏）。
-Table output with auto-colored P&L column.
-
-## 回测引擎 | Backtest Engine
-
-确定性回测 — 相同输入永远产生相同输出，无 LLM 依赖。
-Deterministic — same input always produces same output, no LLM dependency.
-
-| 特性 | Feature | 说明 | Description |
-|------|---------|------|-------------|
-| 滑点模型 | Slippage | Tick滑点(A股0.01)、固定BPS、成交量冲击 | Tick, fixed BPS, volume impact |
-| 佣金模型 | Commission | ASHARE真实费率: 印花税+过户费+券商佣金 | Stamp duty + transfer + brokerage |
-| 基准对比 | Benchmark | 沪深300/中证500 — Alpha/Beta/IR/捕获比 | CSI300/500 — Alpha/Beta/IR |
-| 绩效指标 | Metrics | 总收益/年化/夏普/回撤/胜率/盈亏比 | Return/Sharpe/Drawdown/Win rate |
-| 多策略对比 | Comparison | 单标的运行多策略横向比较 | Cross-strategy comparison |
-
-### 内置策略 | Built-in Strategies
-
-| 策略 | Strategy | 说明 | Description |
-|------|----------|------|-------------|
-| `ma_crossover` | MA Crossover | MA5/20 金叉死叉 | Golden/death cross |
-| `ma_crossover_volume` | MA + Volume | MA交叉+放量确认 | With volume confirmation |
-| `ma_crossover_trend` | MA + Trend | MA交叉+趋势过滤 | With trend filter |
-| `triple_filter` | Triple Filter | 金叉+趋势+RSI+量 | Golden cross + trend + RSI + volume |
-| `price_breakout` | Price Breakout | 突破N日高低点 | N-day high/low breakout |
-| `buy_and_hold` | Buy & Hold | 买入持有（基准） | Baseline strategy |
-
-## 风控引擎 | Risk Engine
-
-确定性风控 — 无LLM依赖，全部可审计。
-Deterministic risk — no LLM dependency, fully auditable.
-
-| 规则 | Rule | 硬限制 | 软限制 | 触发 |
-|------|------|--------|--------|------|
-| ST股票 | ST stocks | ✓ | — | REJECT |
-| 单只持仓>20% | Single position >20% | ✓ | — | REJECT |
-| 总仓位>70% | Total exposure >70% | ✓ | — | REJECT |
-| 日内回撤>5% | Daily drawdown >5% | ✓ | — | REJECT |
-| 连续亏损>3次 | Consecutive losses >3 | ✓ | — | REJECT |
-| 单笔订单>10% | Single order >10% | — | ✓ | WARN |
-| 置信度<0.3 | Confidence <0.3 | — | ✓ | WARN |
-| 累计亏损>15% | Accumulated loss >15% | 熔断 | — | 暂停30min |
-
-## API 服务器 | API Server
-
-FastAPI 多租户 HTTP API，启动：
-FastAPI multi-tenant HTTP API, start with:
+### 第三步：启动服务
 
 ```bash
-python -m managed_agents.api.server
-```
-
-| 端点 | Endpoint | 说明 | Description |
-|------|----------|------|-------------|
-| `GET /` | Root | 状态页 | Status page |
-| `GET /api/v1/health` | Health | 健康检查 | Health check |
-| `GET/POST /api/v1/tenants` | Tenants | 租户管理 | Tenant management |
-| `GET /api/v1/agents` | Agents | Agent列表 | List agents |
-| `POST /api/v1/sessions` | Sessions | 创建会话 | Create session |
-| `WS /api/v1/ws/alerts` | Alerts | 实时告警 | Real-time alerts |
-| `GET /docs` | Docs | Swagger文档 | Swagger docs |
-
-## 部署 | Deployment
-
-```bash
-# 飞书全栈 | Feishu full-stack
+# 一键启动飞书全栈服务（推荐）
 python -m managed_agents.main feishu
-
-# 哨兵盯盘 | Sentinel monitoring (60s间隔)
-python -m managed_agents.main sentinel --interval 60
-
-# Agent决策链回测 | Agent decision chain backtest
-python -m managed_agents.main backtest run -d 2026-05-08 -p 688017 600519 300750
 ```
 
-### 定时任务 | Scheduled Tasks
+启动后系统会自动运行：
+- **飞书 Bot 24h 在线** — 随时在群里发消息问行情，Bot 自动回复
+- **交易日 09:00~15:05** — 调度器 + 哨兵自动开启，盘后自动休眠
 
-| 时间 | Time | 任务 | Task |
-|------|------|------|------|
-| 09:02 | Morning | 盘前扫描 | Pre-market scan |
-| 09:37 | Session 1 | 盘中首扫 | First intraday scan |
-| 13:05 | Session 2 | 午后异动 | Afternoon monitoring |
-| 14:52 | Close | 尾盘提醒 | Pre-close check |
-| 15:10 | Review | 盘后复盘 | Post-market review |
+### 第四步：在飞书上接收推送
 
-## 配置 | Configuration
+无需任何额外操作。只要配置正确，系统会在盘中自动推送：
 
-环境变量 | Environment variables:
+---
 
-| 变量 | Variable | 说明 | Description |
-|------|----------|------|-------------|
-| `ATRADE_LOG_LEVEL` | Log Level | 日志级别 (`DEBUG`/`INFO`) |
-| `ANTHROPIC_BASE_URL` | LLM URL | LLM API地址 |
-| `ANTHROPIC_AUTH_TOKEN` | LLM Key | LLM API Key |
-| `FEISHU_WEBHOOK_URL` | Webhook | 飞书通知URL |
-| `AGENT_SENTINEL_INTERVAL` | Scan Interval | 哨兵扫描间隔(秒) |
+## 功能总览
 
-## 文件结构 | File Structure
+### 1. 盘前简报 — 每个交易日 09:00 推送
+
+飞书群中收到一条汇总消息，包含：
 
 ```
-astock_trade/               # 交易核心 | Trading core
-├── cli.py                  # CLI入口 + rich UI输出 | CLI with rich UI
-├── config.py               # 统一配置中心 | Unified config
-├── monitor.py              # 健康检查(7子系统) | Health monitor
-├── risk_engine.py          # 确定性风控 | Risk engine
-├── signal_bus.py           # 消息总线 | Signal bus
-├── utils/
-│   ├── cli_ui.py           # rich UI组件库 | UI components ← NEW
-│   ├── logging_setup.py    # 日志配置 | Logging
-│   └── alerting.py         # 告警路由 | Alerting
-├── backtest/               # 回测引擎 | Backtest engine
-│   ├── engine.py           # 回测引擎 | Engine
-│   ├── models.py           # 滑点/佣金模型 | Slippage/commission
-│   ├── benchmark.py        # 基准对比 | Benchmark
-│   ├── metrics.py          # 绩效指标 | Performance metrics
-│   ├── strategies.py       # 6种内置策略 | 6 built-in strategies
-│   └── strategy_registry.py# 策略注册表 | Registry
-├── broker/                 # 券商对接 | Broker integration
-├── skills/                 # Agent技能 | Agent skills
-└── ...
-
-managed_agents/             # Agent编排 | Agent orchestration
-├── main.py                 # 主入口 | Main entry
-├── api/
-│   ├── server.py           # FastAPI服务 + CORS | API server
-│   └── adapter.py          # 模型适配 | Model adapter
-├── agents/roles/           # 角色Agent | Role agents
-├── orchestra/              # 编排器 | Orchestrator
-└── backtest/               # Agent决策链回测 | Agent decision backtest
-
-astock_data/                # 数据源 | Data sources
-├── core/                   # 数据源管理/缓存 | DataSource manager/cache
-├── market/                 # 行情接口 | Market data APIs
-└── ...
+📊 昨日复盘           — 持仓回顾、盈亏总结
+🌙 外围市场 & 盘前简报 — 美股/A50/港股期货表现
+🔥 今日题材           — TOP5 热点板块
+📈 机会板块           — 置信度达标的可买入板块
+📝 交易策略           — LLM 基于热点生成的策略建议
+💼 仓位规划           — 今日仓位目标、行业配置
 ```
 
-## License
+### 2. 盘中机会推送 — 每 5 分钟自动扫描
 
-Apache License 2.0
+当系统扫描到强势板块（≥3 只涨停/大涨股）时，立即推送：
+
+```
+📈 机会板块:
+  🟢 算力 置信度60% (4只涨停)
+  🟢 PCB 置信度55% (3只涨停)
+```
+
+触发自动链路：推送 → 风控审查 → 交易员执行（如已配置）。
+
+### 3. 哨兵盯盘 — 盘中实时异动预警
+
+每 120 秒扫描一次，发现以下异动立即推送：
+
+| 异动类型 | 告警级别 |
+|---------|---------|
+| 大盘跳水（上证/深成指/创业板/科创50/沪深300）≥2% | 🔴 紧急 |
+| 大盘跌幅 ≥1.5%（上证） | 🟡 关注 |
+| 北向资金快速流入/流出 ≥20 亿 | 🟡 关注 |
+| 北向累计流入/流出 ≥50 亿 | 🔴 紧急 |
+| 快讯含"突发/紧急/暴涨/暴跌/熔断"关键词 | 🔴 紧急 |
+
+### 4. 飞书 Bot 交互 — 随时发消息问行情
+
+在飞书群中发消息，Bot 自动回复，回复基于实时数据：
+
+```
+用户: 今天什么板块最强？
+ Bot: 目前热点前5：
+     • 算力(8只涨停) 半导体(5只涨停) PCB(4只涨停)
+     北向资金: 沪股通+12.3亿 深股通+8.7亿 合计+21.0亿
+
+用户: 帮我分析一下 600519
+ Bot: [输出实时行情 + 技术指标 + 板块对比分析...]
+
+用户: 在吗 / 好的 / 谢谢
+ Bot: [简短回复，不啰嗦]
+```
+
+### 5. Agent 决策链路（盘前 → 盘中 → 盘后）
+
+```
+09:00 ─ 盘前
+  Morning Analyst     → 生成盘前简报（外围市场/重磅消息/热点预判）
+  Researcher Trader   → 扫描题材 + 生成买入信号
+  Portfolio Manager   → 制定仓位计划
+
+09:30~15:00 ─ 盘中（每5分钟）
+  Researcher Trader   → 扫描热点 + 生成信号
+  ↓ 有合格信号
+  Risk Officer        → 风控审查
+  ↓ 审批通过
+  Day Trader          → 执行交易
+
+15:00~16:00 ─ 盘后
+  Portfolio Manager   → 复盘总结（次日盘前推送）
+```
+
+### 6. 消息总线（Agent 间通信）
+
+Agent 之间通过文件消息总线交换数据，方便调试和审计：
+
+| 频道 | 数据流向 | 用途 |
+|------|---------|------|
+| `from_researcher` | 研究员 → 风控官 | 交易信号 |
+| `from_risk_officer` | 风控官 → 交易员 | 审批结果 |
+| `from_trader` | 交易员 → 所有人 | 执行结果 |
+| `portfolio_plan` | 操盘手 → 研究员 | 仓位计划 |
+| `alerts` | 任何人 → 用户 | 告警 |
+
+### 7. 回测系统
+
+**Agent 决策链回测** — 在历史数据上重放完整 Agent 决策过程，评估信号质量：
+
+```bash
+# 单日回测
+python -m managed_agents.main backtest run --date 2026-05-15
+
+# 自定义股票池
+python -m managed_agents.main backtest run --date 2026-05-15 --pool 600519 000858 300750
+
+# 批量回测（多日）
+python -m managed_agents.main backtest batch --start 2026-05-10 --end 2026-05-15
+```
+
+**传统策略回测** — 6 种内置策略，确定性回测（无 LLM 依赖）：
+
+```bash
+python -m astock_trade.cli backtest run 600519 --strategy ma_crossover --cash 100000
+python -m astock_trade.cli backtest compare 600519
+python -m astock_trade.cli backtest batch 600519 000858 002230 --strategy triple_filter
+```
+
+### 8. 风控规则
+
+| 规则 | 类型 | 触发动作 |
+|------|------|---------|
+| ST/*ST 股票 | 硬限制 | 拒绝交易 |
+| 单只持仓 > 总资产 20% | 硬限制 | 拒绝交易 |
+| 总仓位 > 70% | 硬限制 | 拒绝交易 |
+| 日内回撤 > 5% | 硬限制 | 停止所有交易 |
+| 连续止损 3 次 | 硬限制 | 暂停交易 30 分钟 |
+| 单笔交易 > 总资产 10% | 软限制 | 警告 |
+| 累计亏损 > 15% | 熔断 | 暂停交易 30 分钟 |
+
+---
+
+## CLI 命令速查
+
+### 启动服务
+```bash
+python -m managed_agents.main feishu               # 飞书全栈（推荐）
+python -m managed_agents.main sentinel --interval 120  # 仅哨兵
+```
+
+### 单次执行
+```bash
+python -m managed_agents.main researcher analyze 600519   # 个股分析
+python -m managed_agents.main strategist briefing          # 生成早报
+python -m managed_agents.main strategist review            # 收盘复盘
+```
+
+### 数据查询
+```bash
+python -m astock_data.cli signal hotspot --sectors   # 热点板块
+python -m astock_data.cli signal northbound           # 北向资金
+python -m astock_data.cli news flash -n 10            # 最新快讯
+python -m astock_trade.cli status                     # 系统状态
+python -m astock_trade.cli status --health            # 健康检查
+python -m astock_trade.cli journal query --start 2026-05-22 --end 2026-05-22  # 交易记录
+```
+
+### Session 管理（长时间运行任务）
+```bash
+python -m managed_agents.main session create researcher "分析贵州茅台"   # 创建
+python -m managed_agents.main session run <id>                          # 执行
+python -m managed_agents.main session list                              # 列表
+python -m managed_agents.main session status <id>                       # 状态
+python -m managed_agents.main session resume <id> "继续分析"             # 恢复
+```
+
+---
+
+## 项目结构
+
+```
+魔兽/
+├── managed_agents/                  # Agent 系统
+│   ├── main.py                      # CLI 入口 + 飞书全栈启动
+│   ├── config.py                    # 全局配置
+│   ├── agents/
+│   │   ├── base.py                  # Agent 基类
+│   │   ├── registry.py              # 注册中心（单例）
+│   │   └── roles/
+│   │       ├── sentinel.py          # 哨兵 — 实时盯盘异动预警
+│   │       ├── morning_analyst.py   # 盘前分析师 — 生成晨报
+│   │       ├── researcher_trader.py # 量化研究员 — 扫描 + 信号生成
+│   │       ├── risk_officer.py      # 风控官 — 交易审批
+│   │       ├── day_trader.py        # 交易员 — 下单执行
+│   │       └── portfolio_manager.py # 操盘手 — 仓位管理 + 复盘
+│   ├── orchestra/
+│   │   ├── scheduler.py             # 交易时段调度器
+│   │   └── coordinator.py           # Agent 工作流编排
+│   ├── utils/
+│   │   ├── notifier.py              # 飞书通知引擎
+│   │   └── feishu_bot.py            # 飞书 SDK 长连接 Bot
+│   ├── api/client.py                # LLM API 客户端
+│   ├── backtest/                    # Agent 决策链回测
+│   └── sessions/                    # Session 管理
+│
+├── astock_trade/                    # 交易核心库
+│   ├── config.py / bus.py           # 配置 / 文件消息总线
+│   ├── skills/
+│   │   ├── market_monitor.py        # 盘中扫描
+│   │   ├── morning_scan.py          # 盘前扫描
+│   │   ├── signal_generator.py      # 信号生成
+│   │   ├── postmarket_recap.py      # 盘后复盘
+│   │   └── risk_assessor.py         # 风控评估
+│   ├── risk_engine.py               # 风控引擎
+│   ├── broker/                      # 券商接口（Mock / 同花顺）
+│   └── backtest/                    # 传统策略回测
+│
+├── astock_data/                     # 数据源（行情/热点/北向/快讯/研报/公告）
+└── .env                             # 环境变量配置
+```
+
+---
+
+## 常见问题
+
+**Q: 如何判断系统是否在运行？**
+A: 控制台输出 `飞书全栈服务运行中` + 飞书群收到 `调度器上线` 通知。
+
+**Q: 盘后系统在做什么？**
+A: 15:05 后调度器和哨兵自动停止，深度休眠到次日 09:00。飞书 Bot 仍在线可以回复消息。
+
+**Q: 为什么盘中没收到推送？**
+A: 可能原因：
+- 当前没有符合条件的板块（需要 ≥3 只涨停/大涨股）
+- 不是交易日
+- 信号被过滤（置信度 <0.55 或板块为"其他"等无效分类）
+
+**Q: 如何查看系统日志？**
+A: 所有通知同时写入 `data/alerts/alert.log` 审计文件，Agent 日志由 `logging_setup.py` 配置。
+
+---
+
+> **免责声明**: 本项目为量化交易研究和辅助决策工具，不构成投资建议。所有交易决策需用户自行判断。
