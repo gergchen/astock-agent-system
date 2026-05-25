@@ -22,3 +22,6 @@ TA-Lib>=0.6.0
 # Douyin content monitoring
 httpx>=0.27.0
 Pillow>=10.0.0
+
+# THS broker (同花顺模拟交易)
+easytrader>=0.15

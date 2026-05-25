@@ -31,6 +31,11 @@ Agent 决策链回测:
 记忆管理:
     python -m managed_agents.main memory list [--tier user|project|session]
     python -m managed_agents.main memory search <query>
+
+经验学习:
+    python -m managed_agents.main experience learn [--days 30]
+    python -m managed_agents.main experience stats
+    python -m managed_agents.main experience patterns
 """
 
 import argparse
@@ -62,6 +67,8 @@ from managed_agents.agents.roles.portfolio_manager import PortfolioManager
 from managed_agents.sessions.session_manager import SessionManager
 from managed_agents.coordinator.coordinator import Coordinator
 from managed_agents.memory.memory_store import MemoryStore
+from managed_agents.experience.pattern_learner import run_pattern_analysis, get_all_patterns
+from managed_agents.experience.trade_experience import experience_stats
 from managed_agents.utils.notifier import notify, sleep_until_next_session
 from managed_agents.config import get_config
 from managed_agents.backtest.engine import DecisionChainBacktester, BacktestConfig, DEFAULT_POOL
@@ -74,8 +81,14 @@ _MSG_DEDUP_WINDOW = 30.0  # 30秒，仅防手滑双击
 
 ALL_AGENT_CLASSES = [Sentinel, MorningAnalyst, ResearcherTrader, DayTrader, RiskOfficer, PortfolioManager]
 
+# Broker 实例 (由 main() 根据 --ths 标志初始化)
+_BROKER = None
 
-def _setup(all_agents: bool = False):
+
+def _setup(all_agents: bool = False, broker=None):
+    global _BROKER
+    if broker is None:
+        broker = _BROKER
     config = get_config()
     registry = AgentRegistry.get_instance()
     session_mgr = SessionManager.get_instance()
@@ -83,7 +96,12 @@ def _setup(all_agents: bool = False):
     classes = ALL_AGENT_CLASSES if all_agents else [Sentinel]
     for agent_cls in classes:
         try:
-            agent = agent_cls()
+            if agent_cls is DayTrader:
+                agent = DayTrader(broker=broker)
+            elif agent_cls is RiskOfficer:
+                agent = RiskOfficer(broker=broker)
+            else:
+                agent = agent_cls()
             registry.register(agent)
             session_mgr.register_agent(agent)
         except Exception as e:
@@ -92,13 +110,21 @@ def _setup(all_agents: bool = False):
     return config, registry, session_mgr
 
 
-def _setup_coordinator():
+def _setup_coordinator(broker=None):
+    global _BROKER
+    if broker is None:
+        broker = _BROKER
     """初始化所有 Agent + Coordinator."""
-    _setup(all_agents=True)
+    _setup(all_agents=True, broker=broker)
     coordinator = Coordinator.get_instance()
     for agent_cls in ALL_AGENT_CLASSES:
         try:
-            agent = agent_cls()
+            if agent_cls is DayTrader:
+                agent = DayTrader(broker=broker)
+            elif agent_cls is RiskOfficer:
+                agent = RiskOfficer(broker=broker)
+            else:
+                agent = agent_cls()
             coordinator.register_agent(agent)
         except Exception as e:
             logger.warning(f"Coordinator: failed to register {agent_cls.__name__}: {e}")
@@ -201,7 +227,8 @@ def cmd_coordinator(args):
 
         for i, step in enumerate(result["steps"]):
             status = "OK" if step["success"] else "FAIL"
-            print(f"\n--- Step {i+1}: {step['agent']} ({status}, {step['elapsed_ms']}ms) ---")
+            elapsed = step.get("elapsed_ms", 0)
+            print(f"\n--- Step {i+1}: {step['agent']} ({status}, {elapsed}ms) ---")
             print(step["output"][:600])
             if step.get("error"):
                 print(f"  错误: {step['error']}")
@@ -362,12 +389,15 @@ def cmd_session_history(args):
 # Feishu Bot
 # ═══════════════════════════════════════════════════════════════════
 
-def run_feishu_bot():
+def run_feishu_bot(broker=None):
     """启动飞书全栈服务 — bot 进站 + 哨兵盯盘 + 调度器定时推送.
 
     Bot 在线 24h 随时回复用户消息；
     哨兵/调度器 15:05 停服，次日 8:55 自动唤醒，避免盘后空转。
     """
+    global _BROKER
+    if broker is not None:
+        _BROKER = broker
     # ── PID 锁文件：防重复启动（原子创建 + tasklist 验证）──
     this_pid = os.getpid()
     _pid_file = Path(tempfile.gettempdir()) / "feishu_bot.pid"
@@ -423,7 +453,13 @@ def run_feishu_bot():
             coordinator = Coordinator.get_instance()
             for agent_cls in ALL_AGENT_CLASSES:
                 try:
-                    coordinator.register_agent(agent_cls())
+                    if agent_cls is DayTrader:
+                        agent = DayTrader(broker=_BROKER)
+                    elif agent_cls is RiskOfficer:
+                        agent = RiskOfficer(broker=_BROKER)
+                    else:
+                        agent = agent_cls()
+                    coordinator.register_agent(agent)
                 except Exception as e:
                     logger.warning(f"注册 {agent_cls.__name__} 失败: {e}")
             scheduler = Scheduler(coordinator)
@@ -740,8 +776,35 @@ def cmd_douyin(args):
         print("未知命令. 可用: monitor, scan-user, analyze-video, list, user-info")
 
 
+def cmd_experience(args):
+    """经验学习命令."""
+    if args.exp_action == "learn":
+        from datetime import date, timedelta
+        days = args.days or 30
+        print(f"运行模式分析 (最近 {days} 天)...")
+        result = run_pattern_analysis(
+            start_date=date.today() - timedelta(days=days),
+            end_date=date.today(),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif args.exp_action == "stats":
+        stats = experience_stats()
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+    elif args.exp_action == "patterns":
+        patterns = get_all_patterns()
+        if not patterns:
+            print("暂无学习到的模式")
+            return
+        for key, val in patterns.items():
+            print(f"\n  {key}:")
+            print(f"    {json.dumps(val, ensure_ascii=False)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Managed Agents for A-Stock")
+    parser.add_argument("--ths", action="store_true", help="使用同花顺模拟交易")
     sub = parser.add_subparsers(dest="command")
 
     # --- sentinel ---
@@ -822,6 +885,14 @@ def main():
     dy_info = dy_sub.add_parser("user-info", help="获取用户信息")
     dy_info.add_argument("sec_user_id", help="抖音用户 sec_user_id")
 
+    # --- experience ---
+    exp_parser = sub.add_parser("experience", help="交易经验学习")
+    exp_sub = exp_parser.add_subparsers(dest="exp_action")
+    exp_learn = exp_sub.add_parser("learn", help="从历史交易中学习模式")
+    exp_learn.add_argument("--days", type=int, default=30, help="分析近N天的交易 (默认30)")
+    exp_sub.add_parser("stats", help="经验库统计")
+    exp_sub.add_parser("patterns", help="列出已学习的模式")
+
     # --- session ---
     session_parser = sub.add_parser("session", help="Session 管理")
     session_sub = session_parser.add_subparsers(dest="session_cmd")
@@ -848,11 +919,21 @@ def main():
 
     args = parser.parse_args()
 
+    # 初始化 broker（--ths 标志或环境变量 ATRADE_BROKER_TYPE=ths）
+    global _BROKER
+    if args.ths:
+        from astock_trade.broker import create_broker
+        try:
+            _BROKER = create_broker(broker_type="ths")
+            logger.info("使用同花顺模拟交易")
+        except Exception as e:
+            logger.warning(f"THS broker 初始化失败，使用 MockBroker: {e}")
+
     if args.command == "sentinel":
         run_sentinel(interval=args.interval)
 
     elif args.command == "feishu":
-        run_feishu_bot()
+        run_feishu_bot(broker=_BROKER)
 
     elif args.command == "claude-poll":
         cmd_claude_poll(args)
@@ -899,6 +980,9 @@ def main():
 
     elif args.command == "douyin":
         cmd_douyin(args)
+
+    elif args.command == "experience":
+        cmd_experience(args)
 
     else:
         parser.print_help()

@@ -4,6 +4,7 @@ Supports 同花顺虚拟账号 for paper trading validation.
 Phase 1: wraps easytrader. Phase 2: native THS API.
 """
 
+import logging
 import threading
 import time
 from datetime import datetime
@@ -12,6 +13,8 @@ from typing import Optional
 from .base import (
     Account, BrokerBase, Order, OrderSide, OrderStatus, OrderType, Position,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class THSBroker(BrokerBase):
@@ -48,14 +51,32 @@ class THSBroker(BrokerBase):
 
     def connect(self) -> bool:
         """连接到同花顺模拟交易客户端。"""
+        # 确保 tesseract 在 PATH 中（供 easytrader 读取网格数据）
+        import os as _os
+        _tess_path = r"C:\Program Files\Tesseract-OCR"
+        if _os.path.isdir(_tess_path) and _tess_path not in _os.environ["PATH"]:
+            _os.environ["PATH"] += _os.pathsep + _tess_path
+        import pytesseract as _pyt
+        _pyt.pytesseract.tesseract_cmd = _os.path.join(_tess_path, "tesseract.exe")
+
         try:
             import easytrader
             user = easytrader.use("ths")
 
-            if self._exe_path:
-                user.prepare(self._exe_path)
+            exe_path = self._exe_path
+            if not exe_path:
+                # 从同花顺进程获取路径
+                import psutil
+                for proc in psutil.process_iter(["name", "exe"]):
+                    if proc.info["name"] == "xiadan.exe":
+                        exe_path = proc.info["exe"]
+                        break
+
+            if exe_path:
+                user.connect(exe_path)
             else:
-                user.prepare(user.autofix_exe_path())
+                # 自动查找
+                user.connect()
 
             self._user = user
             self._connected = True
@@ -92,21 +113,24 @@ class THSBroker(BrokerBase):
             return self._mock.get_account()
 
         balance = self._user.balance
-        position_data = self._user.position
         positions = []
         total_market = 0.0
-        for p in (position_data or []):
-            pos = Position(
-                symbol=p.get("证券代码", ""),
-                volume=int(p.get("股票余额", 0)),
-                avg_cost=float(p.get("成本价", 0)),
-                current_price=float(p.get("市价", 0)),
-                market_value=float(p.get("市值", 0)),
-                pnl=float(p.get("盈亏", 0)),
-                pnl_pct=float(p.get("盈亏比例(%)", 0)),
-            )
-            positions.append(pos)
-            total_market += pos.market_value
+        try:
+            position_data = self._user.position
+            for p in (position_data or []):
+                pos = Position(
+                    symbol=p.get("证券代码", ""),
+                    volume=int(p.get("股票余额", 0)),
+                    avg_cost=float(p.get("成本价", 0)),
+                    current_price=float(p.get("市价", 0)),
+                    market_value=float(p.get("市值", 0)),
+                    pnl=float(p.get("盈亏", 0)),
+                    pnl_pct=float(p.get("盈亏比例(%)", 0)),
+                )
+                positions.append(pos)
+                total_market += pos.market_value
+        except Exception as e:
+            logger.warning("读取持仓失败(可能缺tesseract环境): %s", e)
 
         return Account(
             cash=float(balance.get("可用金额", 0)),
@@ -133,7 +157,9 @@ class THSBroker(BrokerBase):
             else:
                 result = self._user.sell(symbol, price=price, amount=volume)
 
-        order_id = str(result.get("委托编号", datetime.now().timestamp()))
+        entrust_no = str(result.get("委托编号", ""))
+        contract_no = str(result.get("合同编号", ""))
+        order_id = contract_no or entrust_no or str(datetime.now().timestamp())
         order = Order(
             symbol=symbol,
             side=side,
@@ -155,8 +181,8 @@ class THSBroker(BrokerBase):
             return self._mock.cancel_order(order_id)
 
         with self._lock:
-            result = self._user.cancel(order_id)
-        if result.get("message") == "已受理":
+            result = self._user.cancel_entrust(order_id)
+        if isinstance(result, dict) and result.get("message") == "已受理":
             if order_id in self._orders:
                 self._orders[order_id].status = OrderStatus.CANCELLED
             return True

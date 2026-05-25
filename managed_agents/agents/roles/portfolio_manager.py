@@ -114,16 +114,30 @@ class PortfolioManager(BaseAgent):
         return {"success": result.success, "plan": plan, "elapsed_ms": result.elapsed_ms}
 
     def post_market_recap(self) -> dict:
-        """执行盘后复盘."""
+        """执行盘后复盘（含模式学习）。"""
         try:
             recap = self._daily_recap()
         except Exception as e:
             logger.error(f"盘后复盘失败: {e}")
             return {"error": str(e)}
 
+        # ── 运行模式学习 ──
+        try:
+            from managed_agents.experience.pattern_learner import run_pattern_analysis
+            from datetime import timedelta
+            patterns = run_pattern_analysis(
+                start_date=date.today() - timedelta(days=60),
+                end_date=date.today(),
+            )
+            logger.info(f"模式学习完成: {patterns.get('total_roundtrips', 0)} 笔已平仓交易")
+        except Exception as e:
+            logger.warning(f"模式学习跳过: {e}")
+            patterns = {"status": "skipped"}
+
         task = (
             f"请基于以下数据做盘后复盘，总结当日交易、盈亏归因、策略评估:\n"
-            f"{json.dumps(recap, ensure_ascii=False, indent=2)}"
+            f"{json.dumps(recap, ensure_ascii=False, indent=2)}\n\n"
+            f"近期历史模式参考:\n{json.dumps(patterns, ensure_ascii=False, indent=2)}"
         )
 
         result = self.run(task=task)
@@ -131,5 +145,6 @@ class PortfolioManager(BaseAgent):
             "success": result.success,
             "recap": result.output,
             "data": recap,
+            "patterns": patterns,
             "elapsed_ms": result.elapsed_ms,
         }

@@ -55,6 +55,21 @@ python -m managed_agents.main sentinel --interval 60
 | 09:02 | /morning-scan | 盘前扫描（cc-connect 09:00启动后） |
 | 15:10 | /postmarket-recap | 盘后复盘 |
 
+### 经验学习
+
+```bash
+# 手动触发模式学习（从最近30天交易中提取赢率/模式）
+python -m managed_agents.main experience learn --days 30
+
+# 查看经验库统计
+python -m managed_agents.main experience stats
+
+# 查看已学习的策略模式
+python -m managed_agents.main experience patterns
+```
+
+经验学习在每天盘后复盘（15:10）时自动运行。
+
 ## 哨兵模式
 
 哨兵在笔记本上独立运行，不在本机启动。

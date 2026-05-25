@@ -34,20 +34,16 @@ TRADER_PROMPT = """你是A股交易员，负责执行经风控审批的交易指
 class DayTrader(BaseAgent):
     """交易员 Agent."""
 
-    def __init__(self):
-        from astock_trade.broker.mock_broker import MockBroker
-        from astock_trade.broker.base import OrderSide
+    def __init__(self, broker=None):
+        from astock_trade.broker import create_broker, OrderSide
         from astock_trade.bus import trader_consume_decisions, trader_publish_result
         from astock_trade.trade_journal import record_trade
 
-        self._broker = MockBroker(initial_cash=1_000_000.0)
+        self._broker = broker if broker is not None else create_broker()
         self._OrderSide = OrderSide
         self._consume_decisions = trader_consume_decisions
         self._publish_result = trader_publish_result
         self._record_trade = record_trade
-
-        # 连接 broker
-        self._broker.connect()
 
         super().__init__(name="day-trader", role="交易员")
 
@@ -63,7 +59,7 @@ class DayTrader(BaseAgent):
         })
 
     def _place_order(self, symbol: str, direction: str, price: float,
-                     volume: int) -> dict:
+                     volume: int, strategy: str | None = None) -> dict:
         """执行下单."""
         side = self._OrderSide.BUY if direction.upper() == "BUY" else self._OrderSide.SELL
         order = self._broker.place_order(symbol, side, price, volume)
@@ -74,6 +70,7 @@ class DayTrader(BaseAgent):
             "direction": order.side.value,
             "price": order.filled_price or order.price,
             "volume": order.filled_volume,
+            "strategy": strategy,
             "status": order.status.value,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
@@ -84,15 +81,14 @@ class DayTrader(BaseAgent):
             logger.error(f"发布交易结果失败: {e}")
 
         try:
-            self._record_trade({
-                "symbol": symbol,
-                "direction": direction.upper(),
-                "price": price,
-                "volume": volume,
-                "amount": price * volume,
-                "order_id": order.order_id,
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-            })
+            self._record_trade(
+                symbol=symbol,
+                direction=direction.upper(),
+                price=price,
+                volume=volume,
+                strategy=strategy,
+                notes=f"order_id={order.order_id}",
+            )
         except Exception as e:
             logger.error(f"记录交易失败: {e}")
 
@@ -114,6 +110,7 @@ class DayTrader(BaseAgent):
                     direction=signal["direction"],
                     price=signal["price"],
                     volume=decision.get("adjusted_volume", signal.get("volume", 100)),
+                    strategy=signal.get("strategy"),
                 )
                 results.append({"decision": decision, "result": result, "success": True})
             except Exception as e:

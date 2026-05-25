@@ -75,10 +75,25 @@ def init_app():
     registry = AgentRegistry.get_instance()
     session_mgr = SessionManager.get_instance()
 
+    # 根据配置创建 broker
+    broker = None
+    if config.broker_type == "ths":
+        from astock_trade.broker import create_broker
+        try:
+            broker = create_broker(broker_type="ths")
+            logger.info("API server: 使用同花顺模拟交易")
+        except Exception as e:
+            logger.warning(f"API server: THS broker 初始化失败: {e}")
+
     agents = [Sentinel, MorningAnalyst, ResearcherTrader, DayTrader, RiskOfficer, PortfolioManager]
     for agent_cls in agents:
         try:
-            agent = agent_cls()
+            if agent_cls is DayTrader:
+                agent = DayTrader(broker=broker)
+            elif agent_cls is RiskOfficer:
+                agent = RiskOfficer(broker=broker)
+            else:
+                agent = agent_cls()
             registry.register(agent)
             session_mgr.register_agent(agent)
         except Exception as e:

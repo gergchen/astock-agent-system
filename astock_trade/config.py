@@ -127,6 +127,10 @@ class TradeConfig:
     # ── Alpha Evaluation ──────────────────────────────────────
     alpha_min_periods: int = 30
 
+    # ── Broker ───────────────────────────────────────────────
+    broker_type: str = "mock"             # "mock" or "ths"
+    ths_exe_path: str | None = None       # 同花顺 xiadan.exe 路径
+
     @property
     def sentinel_alerts(self) -> dict:
         """Backward-compatible dict form of sentinel alert toggles."""

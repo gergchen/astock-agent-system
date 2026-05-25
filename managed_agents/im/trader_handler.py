@@ -11,7 +11,6 @@ import json as _json
 import logging
 import re
 import subprocess
-import threading
 import time
 from datetime import datetime, time as dt_time
 from pathlib import Path
@@ -21,11 +20,6 @@ from ..config import get_config
 from ..memory.memory_store import MemoryStore
 
 logger = logging.getLogger(__name__)
-
-# 消息去重（模块级，支持多实例共享）
-_USER_MSG_DEDUP: dict[str, float] = {}
-_MSG_DEDUP_LOCK = threading.Lock()
-_MSG_DEDUP_WINDOW = 30.0
 
 CLAUDE_CLI = [
     "node",
@@ -45,6 +39,8 @@ class TraderHandler:
         # 对话历史: chat_id -> [{"role": "user"/"assistant", "content": str}, ...]
         self._trader_history: dict[str, list[dict]] = {}
         self._MAX_HISTORY_EXCHANGES = 10
+        self._last_reply: dict[str, tuple[str, float]] = {}
+        self._OUTPUT_DEDUP_WINDOW = 30.0
 
     # ── 工具方法 ──
 
@@ -269,13 +265,6 @@ class TraderHandler:
 
     def handle_message(self, chat_id: str, user_text: str, chat_type: str = "group") -> str | None:
         """统一消息入口：去重 → 路由 → 处理。"""
-        _key = f"{chat_id}|{user_text}"
-        with _MSG_DEDUP_LOCK:
-            _now = time.time()
-            if _key in _USER_MSG_DEDUP and _now - _USER_MSG_DEDUP[_key] < _MSG_DEDUP_WINDOW:
-                return None
-            _USER_MSG_DEDUP[_key] = _now
-
         try:
             if chat_type == "p2p":
                 return self._handle_claude_private(chat_id, user_text)
@@ -304,7 +293,9 @@ class TraderHandler:
                 chat_memories = []
 
             context = self._build_data_context(user_text)
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             system_parts = [
+                f"当前日期: {now_str}",
                 "你是用户的私人交易员，在群里和他交流 A 股。",
                 "风格：自然口语化，像朋友聊股票一样，轻松但有干货。",
                 "要求：",
@@ -355,6 +346,13 @@ class TraderHandler:
             except Exception as e:
                 logger.debug(f"记忆存储失败: {e}")
 
+            # 交易员输出去重：同一 chat 短时间内相同回复不重复发送
+            _now = time.time()
+            _prev = self._last_reply.get(chat_id)
+            if _prev and _prev[0] == reply and _now - _prev[1] < self._OUTPUT_DEDUP_WINDOW:
+                return None
+            self._last_reply[chat_id] = (reply, _now)
+
             return f"[交易员] {reply}"
         except Exception as e:
             logger.error(f"交易员处理失败: {e}", exc_info=True)
@@ -380,9 +378,10 @@ class TraderHandler:
     def _handle_claude(self, chat_id: str, user_text: str) -> str:
         """Claude 处理路径 — 转发给 Claude Code CLI。"""
         context = self._build_data_context(user_text)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         full_prompt = user_text
         if context:
-            full_prompt = f"以下是当前市场数据，参考但不限于此：\n{context}\n\n用户问题：{user_text}"
+            full_prompt = f"当前时间 {now_str}\n\n以下是当前市场数据，参考但不限于此：\n{context}\n\n用户问题：{user_text}"
 
         try:
             from ..utils.claude_bridge import call_claude

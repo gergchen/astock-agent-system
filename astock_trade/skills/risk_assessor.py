@@ -4,10 +4,13 @@ Checks trading signals against risk rules before approving execution.
 """
 
 import json
+import logging
 from datetime import date, datetime
 from pathlib import Path
 
 from ..config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 # ── Risk Rules ──────────────────────────────────────────────────
@@ -73,6 +76,60 @@ def check_st_ban(symbol: str) -> dict:
     }
 
 
+# ── Experience Check ───────────────────────────────────────────
+
+def check_experience_pattern(signal: dict) -> dict:
+    """查历史经验：当前信号的策略历史胜率如何？
+
+    从 MemoryStore 读取 pattern:strategy:{strategy_name}，
+    如果该策略历史胜率低于 40%，给出警告但不阻止交易。
+    """
+    strategy = signal.get("strategy") or signal.get("signal_type", "")
+    if not strategy:
+        return {"rule": "experience_pattern", "passed": True, "detail": "无策略信息，跳过经验检查"}
+
+    try:
+        from managed_agents.experience.pattern_learner import get_strategy_win_rate
+        pattern = get_strategy_win_rate(strategy)
+    except Exception:
+        return {"rule": "experience_pattern", "passed": True, "detail": "经验模块未就绪，跳过"}
+
+    if not pattern:
+        return {"rule": "experience_pattern", "passed": True, "detail": f"策略「{strategy}」暂无历史数据"}
+
+    win_rate = pattern.get("win_rate", 0)
+    total = pattern.get("total", 0)
+
+    if total < 3:
+        return {
+            "rule": "experience_pattern", "passed": True,
+            "detail": f"策略「{strategy}」历史样本不足({total}笔)，暂不参考",
+        }
+
+    if win_rate < 0.30:
+        return {
+            "rule": "experience_pattern", "passed": False,
+            "detail": f"⚠️ 策略「{strategy}」历史胜率仅 {win_rate:.0%}({total}笔)，建议谨慎",
+            "win_rate": win_rate,
+            "total_trades": total,
+        }
+
+    if win_rate < 0.40:
+        return {
+            "rule": "experience_pattern", "passed": True,  # 软性提示，不阻止
+            "detail": f"策略「{strategy}」历史胜率 {win_rate:.0%}({total}笔)，低于平均",
+            "win_rate": win_rate,
+            "total_trades": total,
+        }
+
+    return {
+        "rule": "experience_pattern", "passed": True,
+        "detail": f"策略「{strategy}」历史胜率 {win_rate:.0%}({total}笔)",
+        "win_rate": win_rate,
+        "total_trades": total,
+    }
+
+
 # ── Full Assessment ─────────────────────────────────────────────
 
 def pre_trade_check(signal: dict, account: dict) -> dict:
@@ -100,9 +157,12 @@ def pre_trade_check(signal: dict, account: dict) -> dict:
                              total_assets, positions),
         check_total_exposure(total_position, total_assets),
         check_daily_drawdown(daily_pnl, total_assets),
+        check_experience_pattern(signal),
     ]
 
-    all_passed = all(c["passed"] for c in checks)
+    hard_passed = all(c["passed"] for c in checks[:4])  # 前4项硬性限制
+    soft_passed = checks[4]["passed"]  # 经验检查是软性提示
+    all_passed = hard_passed and soft_passed
     return {
         "type": "risk_decision",
         "signal": signal,

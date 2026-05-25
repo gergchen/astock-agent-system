@@ -49,16 +49,15 @@ RISK_OFFICER_PROMPT = """你是A股风控官，负责所有交易前的风险评
 class RiskOfficer(BaseAgent):
     """风控官 Agent."""
 
-    def __init__(self):
+    def __init__(self, broker=None):
         from astock_trade.skills.risk_assessor import pre_trade_check, publish_decision
         from astock_trade.bus import risk_officer_consume_signals
-        from astock_trade.broker.mock_broker import MockBroker
+        from astock_trade.broker import create_broker
 
         self._pre_trade_check = pre_trade_check
         self._publish_decision = publish_decision
         self._consume_signals = risk_officer_consume_signals
-        self._broker = MockBroker(initial_cash=1_000_000.0)
-        self._broker.connect()
+        self._broker = broker if broker is not None else create_broker()
 
         super().__init__(name="risk-officer", role="风控官")
 

@@ -1,0 +1,18 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "🔵 飞书 Claude 私信",
+            "type": "shell",
+            "command": "cmd.exe /c start https://applink.feishu.cn/client/chat/open?openChatId=oc_bd131a7c9fa2604ee45b2508fb61100c",
+            "group": "none",
+            "presentation": {
+                "echo": false,
+                "reveal": "never",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
