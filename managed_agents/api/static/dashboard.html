@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股交易系统监控面板</title>
+<style>
+:root {
+  --bg: #0f1117; --surface: #1a1b23; --card: #22242e;
+  --border: #2e3040; --text: #e1e1e3; --text-dim: #787890;
+  --green: #2ecc71; --red: #e74c3c; --yellow: #f1c40f; --blue: #4a6cf7;
+  --pre: #09b43a; --morning: #f39c12; --afternoon: #3498db; --post: #9b59b6;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
+.header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+.header-left { display: flex; align-items: center; gap: 14px; }
+.header-left h1 { font-size: 16px; font-weight: 600; }
+.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.period-badge { padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+.period-pre { background: var(--pre); color: #000; }
+.period-morning { background: var(--morning); color: #000; }
+.period-afternoon { background: var(--afternoon); color: #fff; }
+.period-post { background: var(--post); color: #fff; }
+.period-non { background: #333; color: #999; }
+.clock { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.dashboard { flex: 1; display: grid; grid-template-columns: 280px 1fr 280px; gap: 12px; padding: 12px; overflow: hidden; }
+.col { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; }
+.card-header { padding: 8px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.card-body { padding: 8px 12px; overflow-y: auto; flex: 1; }
+.card-body::-webkit-scrollbar { width: 4px; }
+.card-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* Status items */
+.stat-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+.stat-label { color: var(--text-dim); }
+.stat-value { font-weight: 500; }
+.stat-value.green { color: var(--green); }
+.stat-value.red { color: var(--red); }
+.stat-value.yellow { color: var(--yellow); }
+
+/* Timeline */
+.timeline { position: relative; }
+.tl-item { padding: 6px 0 6px 16px; border-left: 2px solid var(--border); position: relative; }
+.tl-item:before { content: ''; position: absolute; left: -5px; top: 10px; width: 8px; height: 8px; border-radius: 50%; }
+.tl-item.signal:before { background: var(--blue); }
+.tl-item.trade:before { background: var(--green); }
+.tl-item.trade.fail:before { background: var(--red); }
+.tl-time { font-size: 11px; color: var(--text-dim); }
+.tl-summary { font-size: 13px; margin: 1px 0; }
+.tl-detail { font-size: 11px; color: var(--text-dim); }
+
+/* Signal items */
+.sig-item { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+.sig-item:last-child { border: none; }
+.sig-sector { font-weight: 600; }
+.sig-conf { float: right; }
+.sig-reason { font-size: 11px; color: var(--text-dim); }
+
+/* Account */
+.acct-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; }
+.acct-label { color: var(--text-dim); }
+.acct-value { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pos-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pos-table th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 3px 4px; border-bottom: 1px solid var(--border); }
+.pos-table td { padding: 3px 4px; border-bottom: 1px solid rgba(255,255,255,.04); }
+.pos-table .up { color: var(--green); }
+.pos-table .down { color: var(--red); }
+
+/* Refresh indicator */
+.refresh { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1000px) {
+  .dashboard { grid-template-columns: 1fr; overflow-y: auto; }
+  .col { max-height: none; }
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <span class="pulse"></span>
+    <h1>A股交易系统</h1>
+    <span id="periodBadge" class="period-badge period-non">盘外</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:14px;">
+    <span class="clock" id="clock">--:--:--</span>
+    <span class="refresh" id="refreshInfo"><span id="refreshIcon">⟳</span> <span id="refreshText">实时</span></span>
+  </div>
+</div>
+
+<div class="dashboard">
+  <!-- Left Column -->
+  <div class="col">
+    <div class="card" style="flex:0 0 auto;">
+      <div class="card-header">系统状态</div>
+      <div class="card-body" id="sysStatus">
+        <div class="stat-row"><span class="stat-label">运行状态</span><span class="stat-value green">● 在线</span></div>
+        <div class="stat-row"><span class="stat-label">服务</span><span class="stat-value" id="agentCount">-</span></div>
+        <div class="stat-row"><span class="stat-label">交易日</span><span class="stat-value" id="tradingDay">-</span></div>
+        <div class="stat-row"><span class="stat-label">当前时段</span><span class="stat-value" id="currentPeriod">-</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="flex:1;">
+      <div class="card-header">账户</div>
+      <div class="card-body" id="accountInfo">
+        <div class="acct-row"><span class="acct-label">总资产</span><span class="acct-value" id="totalAssets">-</span></div>
+        <div class="acct-row"><span class="acct-label">可用资金</span><span class="acct-value green" id="availableCash">-</span></div>
+        <div class="acct-row"><span class="acct-label">冻结</span><span class="acct-value" id="frozen">-</span></div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text-dim);">持仓</div>
+        <table class="pos-table">
+          <thead><tr><th>代码</th><th>数量</th><th>现价</th><th>盈亏</th></tr></thead>
+          <tbody id="positionsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Center Column -->
+  <div class="col">
+    <div class="card" style="flex:1;">
+      <div class="card-header">活动时间线</div>
+      <div class="card-body" id="timelineBody">
+        <div style="color:var(--text-dim);text-align:center;padding:20px;">加载中...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right Column -->
+  <div class="col">
+    <div class="card" style="flex:1;">
+      <div class="card-header">最新信号</div>
+      <div class="card-body" id="signalsBody">
+        <div style="color:var(--text-dim);text-align:center;padding:20px;">加载中...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const COLORS = { pre: '#09b43a', morning: '#f39c12', afternoon: '#3498db', post: '#9b59b6' };
+const PERIOD_NAMES = { pre_market: '盘前', morning_session: '早盘', afternoon_session: '下午盘', post_market: '盘后', non_trading: '盘外' };
+const PERIOD_CLS = { pre_market: 'period-pre', morning_session: 'period-morning', afternoon_session: 'period-afternoon', post_market: 'period-post', non_trading: 'period-non' };
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(11, 19);
+  return d.toTimeString().slice(0, 8);
+}
+
+function fmtAsset(v) {
+  if (v === undefined || v === null) return '-';
+  return '¥' + Number(v).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+async function loadDashboard() {
+  try {
+    const [dash, timeline] = await Promise.all([
+      fetch('/api/v1/dashboard').then(r => r.json()),
+      fetch('/api/v1/dashboard/timeline?limit=25').then(r => r.json()),
+    ]);
+
+    // ── Clock ──
+    if (dash.server_time) {
+      const d = new Date(dash.server_time);
+      document.getElementById('clock').textContent = d.toTimeString().slice(0, 8);
+      const p = new Date().toTimeString().slice(11, 13) === '0' ? new Date() : d;
+    }
+
+    // ── Period ──
+    const period = dash.current_period || 'non_trading';
+    const badge = document.getElementById('periodBadge');
+    badge.textContent = PERIOD_NAMES[period] || period;
+    badge.className = 'period-badge ' + (PERIOD_CLS[period] || 'period-non');
+
+    // ── Status ──
+    document.getElementById('agentCount').textContent = (dash.agents || []).length + ' 个 Agent';
+    document.getElementById('tradingDay').textContent = dash.trading_day ? '是' : '否';
+    document.getElementById('currentPeriod').textContent = PERIOD_NAMES[period] || period;
+
+    // ── Account ──
+    const acct = dash.account || {};
+    if (acct.error) {
+      document.getElementById('totalAssets').textContent = '未连接';
+    } else {
+      document.getElementById('totalAssets').textContent = fmtAsset(acct.total_assets);
+      document.getElementById('availableCash').textContent = fmtAsset(acct.cash);
+      document.getElementById('frozen').textContent = fmtAsset(acct.frozen);
+      const posTbody = document.getElementById('positionsBody');
+      if (acct.positions && acct.positions.length > 0) {
+        posTbody.innerHTML = acct.positions.map(p => `
+          <tr>
+            <td>${p.symbol || '-'}</td>
+            <td>${p.volume || 0}</td>
+            <td>${p.current_price ? '¥' + p.current_price.toFixed(2) : '-'}</td>
+            <td class="${(p.pnl||0) >= 0 ? 'up' : 'down'}">${p.pnl ? (p.pnl>=0?'+':'') + p.pnl.toFixed(2) : '-'}</td>
+          </tr>
+        `).join('');
+      } else {
+        posTbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-dim);padding:8px 0;">空仓</td></tr>';
+      }
+    }
+
+    // ── Timeline ──
+    const tlBody = document.getElementById('timelineBody');
+    const events = timeline.events || [];
+    if (events.length === 0) {
+      tlBody.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无活动</div>';
+    } else {
+      tlBody.innerHTML = '<div class="timeline">' + events.map(e => {
+        const typeCls = e.type === 'trade' && e.detail && e.detail.includes('error') ? 'trade fail' : e.type;
+        return `<div class="tl-item ${typeCls}">
+          <div class="tl-time">${fmtTime(e.time)}</div>
+          <div class="tl-summary">${e.summary || ''}</div>
+          <div class="tl-detail">${e.detail || ''}</div>
+        </div>`;
+      }).join('') + '</div>';
+    }
+
+    // ── Signals ──
+    const sigBody = document.getElementById('signalsBody');
+    const signals = dash.signals || [];
+    if (signals.length === 0) {
+      sigBody.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无信号</div>';
+    } else {
+      sigBody.innerHTML = signals.map(s => `
+        <div class="sig-item">
+          <div class="sig-sector">
+            ${s.sector || s.type || '?'}
+            <span class="sig-conf ${(s.confidence||0) >= 0.7 ? 'green' : (s.confidence||0) >= 0.5 ? 'yellow' : ''}">
+              ${s.confidence ? (s.confidence*100).toFixed(0) + '%' : '-'}
+            </span>
+          </div>
+          <div class="sig-reason">${s.reason || s.direction || ''}</div>
+          <div class="sig-reason">${fmtTime(s.timestamp)}</div>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('refreshText').textContent = '更新于 ' + new Date().toTimeString().slice(0, 8);
+
+  } catch (err) {
+    document.getElementById('timelineBody').innerHTML =
+      '<div style="color:var(--red);text-align:center;padding:20px;">连接失败: ' + err.message + '</div>';
+    document.getElementById('refreshText').textContent = '连接失败';
+  }
+}
+
+// Clock ticker
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toTimeString().slice(0, 8);
+}
+
+setInterval(updateClock, 1000);
+setInterval(loadDashboard, 5000);
+loadDashboard();
+</script>
+</body>
+</html>

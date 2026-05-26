@@ -11,6 +11,8 @@ API 端点:
     GET    /api/v1/agents                   列出可用 Agent
     POST   /api/v1/team/cycle               触发一个完整交易周期
     WS     /api/v1/ws/alerts                实时告警推送
+    POST   /api/v1/chat/send                聊天面板发送消息
+    GET    /chat                            聊天面板页面
 """
 
 import json
@@ -36,6 +38,8 @@ from managed_agents.orchestra.bus import EventBus
 from managed_agents.deploy.tenants import get_tenant_manager
 from astock_trade.utils.logging_setup import setup_logging, get_logger
 from managed_agents.config import get_config
+from managed_agents.im.trader_handler import TraderHandler
+from managed_agents.api.client import get_client
 
 setup_logging()
 logger = get_logger("api_server")
@@ -43,6 +47,8 @@ logger = get_logger("api_server")
 # ── 尝试导入 FastAPI ──
 try:
     from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import RedirectResponse
     from pydantic import BaseModel
     import uvicorn
     HAS_FASTAPI = True
@@ -69,21 +75,24 @@ class TaskRequest(BaseModel):
     context: Optional[dict] = None
 
 
+class ChatRequest(BaseModel):
+    message: str
+
+
 # ── 初始化 ──
 def init_app():
     config = get_config()
     registry = AgentRegistry.get_instance()
     session_mgr = SessionManager.get_instance()
 
-    # 根据配置创建 broker
+    # 尝试创建 broker
     broker = None
-    if config.broker_type == "ths":
-        from astock_trade.broker import create_broker
-        try:
-            broker = create_broker(broker_type="ths")
-            logger.info("API server: 使用同花顺模拟交易")
-        except Exception as e:
-            logger.warning(f"API server: THS broker 初始化失败: {e}")
+    from astock_trade.broker import create_broker
+    try:
+        broker = create_broker(broker_type="ths")
+        logger.info("API server: 使用同花顺模拟交易")
+    except Exception as e:
+        logger.warning(f"API server: THS broker 初始化失败: {e}")
 
     agents = [Sentinel, MorningAnalyst, ResearcherTrader, DayTrader, RiskOfficer, PortfolioManager]
     for agent_cls in agents:
@@ -130,6 +139,23 @@ try:
     )
 except Exception:
     pass
+
+# ── 聊天 Handler（VS Code 内嵌聊天面板用）──
+_chat_handler: TraderHandler | None = None
+def get_chat_handler() -> TraderHandler:
+    global _chat_handler
+    if _chat_handler is None:
+        _chat_handler = TraderHandler(get_client())
+    return _chat_handler
+
+# ── 挂载静态文件 ──
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    try:
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+        logger.info(f"Static files mounted from {STATIC_DIR}")
+    except Exception as e:
+        logger.warning(f"Failed to mount static files: {e}")
 
 # ── WebSocket 连接池 ──
 ws_clients: list[WebSocket] = []
@@ -271,6 +297,112 @@ async def ws_alerts(websocket: WebSocket):
         ws_clients.remove(websocket)
 
 
+# ── 聊天面板（VS Code 内嵌）──
+VSCODE_CHAT_ID = "vscode_chat_internal"
+
+@app.post("/api/v1/chat/send")
+def chat_send(body: ChatRequest):
+    if not body.message.strip():
+        raise HTTPException(status_code=400, detail="消息不能为空")
+    try:
+        handler = get_chat_handler()
+        reply = handler.handle_message(
+            chat_id=VSCODE_CHAT_ID,
+            user_text=body.message.strip(),
+            chat_type="p2p",
+        )
+        return {"reply": reply or "(空回复)"}
+    except Exception as e:
+        logger.error(f"Chat API error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat")
+def chat_page():
+    return RedirectResponse(url="/static/chat.html")
+
+
+# ── 监控面板数据 ──
+@app.get("/api/v1/dashboard")
+def dashboard():
+    """监控面板 — 系统运行状态全览."""
+    from datetime import time as dt_time
+    from managed_agents.orchestra.scheduler import TRADING_SCHEDULE, _get_period
+    from astock_trade.bus import peek, list_channels
+    now = datetime.now()
+
+    # 交易时段
+    period = _get_period(now.time())
+    is_trading = now.weekday() < 5 and dt_time(9, 0) <= now.time() < dt_time(15, 0)
+
+    # 信号 & 执行（从消息总线读取）
+    signals = peek("from_researcher", limit=5)
+    results = peek("from_trader", limit=10)
+
+    # 账户（如果 broker 有）
+    account_data = {}
+    try:
+        from astock_trade.broker import create_broker
+        broker = create_broker()
+        if broker:
+            acct = broker.get_account()
+            account_data = {
+                "cash": acct.cash,
+                "frozen": acct.frozen,
+                "total_assets": acct.total_assets,
+                "positions": [
+                    {"symbol": p.symbol, "volume": p.volume, "pnl": p.pnl,
+                     "market_value": p.market_value, "current_price": p.current_price}
+                    for p in (acct.positions or [])
+                ],
+            }
+    except Exception:
+        account_data = {"error": "Broker not available"}
+
+    return {
+        "status": "ok",
+        "server_time": now.isoformat(timespec="seconds"),
+        "trading_day": is_trading,
+        "current_period": period or "non_trading",
+        "agents": registry.list_all(),
+        "signals": signals,
+        "trade_results": results,
+        "account": account_data,
+    }
+
+
+@app.get("/api/v1/dashboard/timeline")
+def dashboard_timeline(limit: int = 20):
+    """活动时间线 — 信号 + 交易 + 通知合并输出."""
+    from astock_trade.bus import (
+        peek, list_channels
+    )
+    events = []
+
+    # 交易信号
+    for s in peek("from_researcher", limit=10):
+        events.append({
+            "time": s.get("timestamp", ""),
+            "type": "signal",
+            "summary": f"[{s.get('sector','')}] {s.get('direction','')} 置信度{s.get('confidence',0):.0%}",
+            "detail": s.get("reason", ""),
+        })
+
+    # 执行结果
+    for r in peek("from_trader", limit=10):
+        ok = r.get("success", False)
+        res = r.get("result", {})
+        events.append({
+            "time": res.get("timestamp", r.get("timestamp", "")),
+            "type": "trade",
+            "summary": f"{'✅' if ok else '❌'} {res.get('symbol','')} {res.get('direction','')} {res.get('price','')}x{res.get('volume','')}",
+            "detail": f"status={res.get('status','')}" if ok else f"error={r.get('error','')}",
+        })
+
+    events.sort(key=lambda e: e["time"], reverse=True)
+    return {"events": events[:limit]}
+
+
 # ── 健康检查 ──
 @app.get("/api/v1/health")
 def health():
@@ -282,26 +414,10 @@ def health():
     }
 
 
-# ── 根路径 — 状态页 ──
+# ── 根路径 — 监控面板 ──
 @app.get("/")
 def root():
-    return {
-        "service": "Managed Agents API",
-        "version": "0.2.0",
-        "status": "running",
-        "endpoints": {
-            "health": "GET /api/v1/health",
-            "tenants": "GET/POST /api/v1/tenants",
-            "agents": "GET /api/v1/agents",
-            "sessions": "POST /api/v1/sessions",
-            "session_detail": "GET /api/v1/sessions/{id}",
-            "session_history": "GET /api/v1/sessions/{id}/history",
-            "team_cycle": "POST /api/v1/team/cycle",
-            "ws_alerts": "WS /api/v1/ws/alerts",
-            "docs": "GET /docs",
-        },
-        "timestamp": datetime.now().isoformat(),
-    }
+    return RedirectResponse(url="/static/dashboard.html")
 
 
 # ── 统一异常处理 ──
@@ -324,7 +440,7 @@ def main():
     if not HAS_FASTAPI:
         print("FastAPI not installed. Run: pip install fastapi uvicorn pydantic")
         sys.exit(1)
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8081, log_level="info")
 
 
 if __name__ == "__main__":

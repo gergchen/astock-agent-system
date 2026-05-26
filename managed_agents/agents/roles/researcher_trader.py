@@ -65,7 +65,8 @@ class ResearcherTrader(BaseAgent):
 
     def __init__(self):
         from astock_trade.skills.market_monitor import scan_now, scan_hotspots, scan_hotspots_detail, scan_northbound, get_quotes
-        from astock_trade.skills.signal_generator import generate_signals, generate_early_signals, generate_single_signal, publish_signal
+        from astock_trade.skills.signal_generator import generate_signals, generate_early_signals, generate_single_signal, publish_signal, convert_early_to_trade_signals
+        from astock_trade.bus import researcher_publish_signal
         from astock_trade.skills.morning_scan import premarket_scan
         from astock_trade.skills.technical_analysis import TechnicalAnalysisSkills
 
@@ -194,12 +195,33 @@ class ResearcherTrader(BaseAgent):
             try:
                 self._publish_signal(sig)
             except Exception as e:
-                logger.error(f"发布信号失败: {e}")
+                logger.error(f"发布板块信号失败: {e}")
+
+        # 早期机会 → 具体个股交易信号 → 发到消息总线（风控→交易员自动处理）
+        trade_signals = []
+        if early_signals:
+            try:
+                trade_signals = convert_early_to_trade_signals(
+                    early_signals,
+                    total_cash=None,   # broker会在风控环节确认实际资金
+                    max_signals=3,
+                )
+                for ts in trade_signals:
+                    try:
+                        researcher_publish_signal(ts)
+                        logger.info(f"自动交易信号已发布: {ts['symbol']} {ts['direction']} "
+                                    f"{ts['price']}x{ts['volume']} 置信度{ts['confidence']:.0%}")
+                    except Exception as e:
+                        logger.error(f"发布交易信号失败({ts.get('symbol','')}): {e}")
+            except Exception as e:
+                logger.error(f"早期信号转交易指令失败: {e}")
 
         return {
             "signals": signals,
             "early_signals": early_signals,
+            "trade_signals": trade_signals,
             "scan": scan,
             "signal_count": len(signals),
             "early_count": len(early_signals),
+            "trade_count": len(trade_signals),
         }

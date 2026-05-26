@@ -1,0 +1,21 @@
+{
+    "name": "astock-chat",
+    "displayName": "A股交易助手",
+    "description": "VS Code 内嵌 A股交易助手聊天面板",
+    "version": "1.0.0",
+    "publisher": "gergchen",
+    "engines": { "vscode": "^1.80.0" },
+    "categories": ["Other"],
+    "activationEvents": ["onCommand:astock.openChat"],
+    "main": "./extension.js",
+    "contributes": {
+        "commands": [{
+            "command": "astock.openChat",
+            "title": "打开 A股交易助手"
+        }],
+        "keybindings": [{
+            "key": "ctrl+shift+j",
+            "command": "astock.openChat"
+        }]
+    }
+}

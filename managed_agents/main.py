@@ -42,6 +42,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,20 @@ from managed_agents.backtest.report import AttributionReport
 _USER_MSG_DEDUP: dict[str, float] = {}
 _MSG_DEDUP_LOCK = threading.Lock()
 _MSG_DEDUP_WINDOW = 30.0  # 30秒，仅防手滑双击
+
+# 哨兵告警去重 — 同一条告警只发一次（进程生命周期内）
+_SENTINEL_SENT_ALERTS: set[str] = set()
+_SENTINEL_ALERT_LOCK = threading.Lock()
+
+
+def _sentinel_alert_fp(alert: dict) -> str:
+    """生成告警指纹：移除标题中的数字，只保留模板文本。
+
+    例如两轮扫描中标题分别为 "🟡 大盘跳水: 上证指数 -2.1%"
+    和 "🟡 大盘跳水: 上证指数 -3.3%"，指纹均为 "🟡 大盘跳水: 上证指数"。
+    """
+    title = alert.get("title", "")
+    return re.sub(r'[+-]?\d+\.?\d*%?亿?', '', title).strip()
 
 ALL_AGENT_CLASSES = [Sentinel, MorningAnalyst, ResearcherTrader, DayTrader, RiskOfficer, PortfolioManager]
 
@@ -148,6 +163,11 @@ def run_sentinel(interval: int = 120):
 
             if alerts:
                 for alert in alerts:
+                    fp = _sentinel_alert_fp(alert)
+                    with _SENTINEL_ALERT_LOCK:
+                        if fp in _SENTINEL_SENT_ALERTS:
+                            continue
+                        _SENTINEL_SENT_ALERTS.add(fp)
                     level = alert["level"]
                     notify_level = {"普通": "info", "关注": "warn", "紧急": "alert"}.get(level, "info")
                     notify(alert["title"], alert.get("detail", ""), notify_level)
@@ -484,6 +504,11 @@ def run_feishu_bot(broker=None):
                     try:
                         result = sentinel.scan()
                         for alert in result.get("alerts", []):
+                            fp = _sentinel_alert_fp(alert)
+                            with _SENTINEL_ALERT_LOCK:
+                                if fp in _SENTINEL_SENT_ALERTS:
+                                    continue
+                                _SENTINEL_SENT_ALERTS.add(fp)
                             level = {"普通": "info", "关注": "warn", "紧急": "alert"}.get(alert["level"], "info")
                             notify(alert["title"], alert.get("detail", ""), level)
                     except Exception as e:
@@ -511,8 +536,12 @@ def run_feishu_bot(broker=None):
 
     # ── 3. 消息处理器（路由 / 上下文 / 历史 / 记忆）──
     from managed_agents.im.trader_handler import TraderHandler
+    from managed_agents.im.progress import FeishuCardProgressReporter
     llm = get_client()
-    handler = TraderHandler(llm)
+    handler = TraderHandler(
+        llm,
+        progress_factory=lambda chat_id: FeishuCardProgressReporter(feishu, chat_id),
+    )
 
     # ── 启动 Bot（24h 在线，永不停止）──
     router.set_route_fn(lambda msg: handler.handle_message(msg.chat_id, msg.text, msg.chat_type))

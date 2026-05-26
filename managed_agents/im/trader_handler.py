@@ -33,9 +33,11 @@ CODE_RE = re.compile(r'(?<!\d)([036]\d{5})(?!\d)')
 class TraderHandler:
     """交易员消息处理器 — 路由、上下文、历史、记忆。"""
 
-    def __init__(self, llm: APIClient):
+    def __init__(self, llm: APIClient, progress_factory=None):
+        """progress_factory: Callable[[chat_id], ProgressReporter] | None"""
         self.llm = llm
         self.config = get_config()
+        self._progress_factory = progress_factory
         # 对话历史: chat_id -> [{"role": "user"/"assistant", "content": str}, ...]
         self._trader_history: dict[str, list[dict]] = {}
         self._MAX_HISTORY_EXCHANGES = 10
@@ -263,24 +265,46 @@ class TraderHandler:
 
     # ── 消息路由 ──
 
-    def handle_message(self, chat_id: str, user_text: str, chat_type: str = "group") -> str | None:
-        """统一消息入口：去重 → 路由 → 处理。"""
+    def handle_message(self, chat_id: str, user_text: str, chat_type: str = "group",
+                       progress_reporter=None) -> str | None:
+        """统一消息入口：去重 → 路由 → 处理。
+
+        progress_reporter: 外部传入的进度报告器（如 FeishuCardProgressReporter）
+        """
         try:
+            # 如果没有外部传入 reporter，用工厂创建
+            reporter = progress_reporter
+            if reporter is None and self._progress_factory:
+                try:
+                    reporter = self._progress_factory(chat_id)
+                except Exception as e:
+                    logger.debug(f"Progress factory failed: {e}")
+
             if chat_type == "p2p":
-                return self._handle_claude_private(chat_id, user_text)
+                return self._handle_claude_private(chat_id, user_text, reporter)
             elif self._needs_claude(user_text):
-                return self._handle_claude(chat_id, user_text)
+                return self._handle_claude(chat_id, user_text, reporter)
             else:
-                return self._handle_trader(chat_id, user_text)
+                return self._handle_trader(chat_id, user_text, reporter)
         except Exception as e:
             logger.error(f"handle_message 异常: {e}", exc_info=True)
             return "系统繁忙，请稍后再试"
 
     # ── 交易员路径 ──
 
-    def _handle_trader(self, chat_id: str, user_text: str) -> str:
+    def _handle_trader(self, chat_id: str, user_text: str,
+                       reporter=None) -> str:
         """DeepSeek + CLI 数据 + 对话历史 + 长期记忆。"""
         try:
+            # ── 进度: 开始 ──
+            reporter_started = False
+            if reporter:
+                try:
+                    reporter.start("A股交易助手", ["查询记忆", "获取行情数据", "分析思考", "生成回复"])
+                    reporter_started = True
+                except Exception as e:
+                    logger.debug(f"Reporter start failed: {e}")
+
             # 查询长期记忆
             try:
                 mem_store = MemoryStore.get_instance()
@@ -292,7 +316,16 @@ class TraderHandler:
             except Exception:
                 chat_memories = []
 
+            if reporter and reporter_started:
+                reporter.update("查询记忆", "done")
+
+            # ── 进度: 获取行情数据 ──
+            if reporter and reporter_started:
+                reporter.update("获取行情数据", "running")
             context = self._build_data_context(user_text)
+            if reporter and reporter_started:
+                reporter.update("获取行情数据", "done")
+                reporter.update("分析思考", "running")
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             system_parts = [
                 f"当前日期: {now_str}",
@@ -320,6 +353,9 @@ class TraderHandler:
                 {"role": "user", "content": f"{context_block}\n\n用户: {user_text}".strip()},
             ]
 
+            if reporter and reporter_started:
+                reporter.update("分析思考", "done")
+                reporter.update("生成回复", "running")
             resp = self.llm.call(messages)
             reply = resp[:6000]
 
@@ -350,42 +386,80 @@ class TraderHandler:
             _now = time.time()
             _prev = self._last_reply.get(chat_id)
             if _prev and _prev[0] == reply and _now - _prev[1] < self._OUTPUT_DEDUP_WINDOW:
+                if reporter and reporter_started:
+                    reporter.finish("(已去重，跳过重复回复)")
                 return None
             self._last_reply[chat_id] = (reply, _now)
+
+            if reporter and reporter_started:
+                reporter.update("生成回复", "done")
+                reporter.finish(reply[:200])
 
             return f"[交易员] {reply}"
         except Exception as e:
             logger.error(f"交易员处理失败: {e}", exc_info=True)
+            if reporter and reporter_started:
+                try:
+                    reporter.error("分析思考", str(e)[:100])
+                except Exception:
+                    pass
             return f"[交易员] 处理异常，请重试"
 
     # ── Claude 路径 ──
 
-    def _handle_claude_private(self, chat_id: str, user_text: str) -> str:
+    def _handle_claude_private(self, chat_id: str, user_text: str,
+                               reporter=None) -> str:
         """私聊路径 — 纯 Claude 对话。"""
         try:
+            if reporter:
+                reporter.start("Claude 对话", ["调用 Claude", "生成回复"])
             from ..utils.claude_bridge import call_claude
+            if reporter:
+                reporter.update("调用 Claude", "running")
             resp = call_claude(user_text, chat_id=chat_id, timeout=300)
+            if reporter:
+                reporter.update("调用 Claude", "done")
+                reporter.finish(resp[:200])
             return resp[:6000]
         except ImportError:
             resp = self.llm.call([{"role": "user", "content": user_text}])
+            if reporter:
+                reporter.finish(resp[:200])
             return f"{resp[:6000]}"
         except TimeoutError:
+            if reporter:
+                reporter.error("调用 Claude", "超时")
             return "任务耗时过长，请在电脑上重试"
         except Exception as e:
             logger.error(f"Claude 私聊失败: {e}", exc_info=True)
+            if reporter:
+                reporter.error("调用 Claude", str(e)[:100])
             return f"调用失败: {e}"
 
-    def _handle_claude(self, chat_id: str, user_text: str) -> str:
+    def _handle_claude(self, chat_id: str, user_text: str,
+                       reporter=None) -> str:
         """Claude 处理路径 — 转发给 Claude Code CLI。"""
-        context = self._build_data_context(user_text)
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        full_prompt = user_text
-        if context:
-            full_prompt = f"当前时间 {now_str}\n\n以下是当前市场数据，参考但不限于此：\n{context}\n\n用户问题：{user_text}"
-
         try:
+            if reporter:
+                reporter.start("Claude 处理", ["获取市场数据", "调用 Claude", "生成回复"])
+
+            if reporter:
+                reporter.update("获取市场数据", "running")
+            context = self._build_data_context(user_text)
+            if reporter:
+                reporter.update("获取市场数据", "done")
+                reporter.update("调用 Claude", "running")
+
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            full_prompt = user_text
+            if context:
+                full_prompt = f"当前时间 {now_str}\n\n以下是当前市场数据，参考但不限于此：\n{context}\n\n用户问题：{user_text}"
+
             from ..utils.claude_bridge import call_claude
             resp = call_claude(full_prompt, chat_id=chat_id, timeout=300)
+            if reporter:
+                reporter.update("调用 Claude", "done")
+                reporter.finish(resp[:200])
             return f"[Claude] {resp[:6000]}"
         except ImportError:
             prompt = (
@@ -395,9 +469,15 @@ class TraderHandler:
                 f"用户: {user_text}"
             )
             resp = self.llm.call([{"role": "user", "content": prompt}])
+            if reporter:
+                reporter.finish(resp[:200])
             return f"[Claude(回退)] {resp[:6000]}"
         except TimeoutError:
+            if reporter:
+                reporter.error("调用 Claude", "超时")
             return "[Claude] 任务耗时过长，请在 VSCode 中重试"
         except Exception as e:
             logger.error(f"Claude 桥接失败: {e}", exc_info=True)
+            if reporter:
+                reporter.error("调用 Claude", str(e)[:100])
             return f"[Claude] 调用失败: {e}"

@@ -231,6 +231,106 @@ def publish_signal(signal: dict) -> Path:
     return p
 
 
+def convert_early_to_trade_signals(
+    early_signals: list[dict],
+    total_cash: float | None = None,
+    max_signals: int = 3,
+    max_per_trade_pct: float = 0.10,
+) -> list[dict]:
+    """Convert early_momentum signals into concrete BUY trade signals.
+
+    Picks strongest actionable stock from each qualifying sector,
+    fetches real-time price, sizes position, returns trade_signal list.
+
+    Args:
+        early_signals: list of early_momentum signal dicts
+        total_cash: available cash for position sizing. None = use default 5w per trade
+        max_signals: max trades to generate per cycle
+        max_per_trade_pct: max fraction of cash per trade (default 10%)
+
+    Returns:
+        List of trade_signal dicts (compatible with risk_officer + day_trader)
+    """
+    if not early_signals:
+        return []
+
+    # Filter: only BUY, sort by confidence desc
+    buys = [
+        s for s in early_signals
+        if s.get("direction") == "BUY" and s.get("actionable_stocks")
+    ]
+    buys.sort(key=lambda s: -s.get("confidence", 0))
+    buys = buys[:max_signals]
+
+    # Collect candidate stock codes
+    candidates = {}
+    for sig in buys:
+        stocks = sig.get("actionable_stocks", [])
+        if stocks:
+            # Pick top stock (highest gain below limit-up)
+            best = stocks[0]
+            candidates[best["code"]] = {
+                "code": best["code"],
+                "name": best["name"],
+                "gain": best["gain"],
+                "sector": sig.get("sector", ""),
+                "confidence": sig.get("confidence", 0.5),
+                "reason": f"{sig.get('sector','')}板块走强({best['name']}+{best['gain']}%)",
+            }
+
+    if not candidates:
+        return []
+
+    # Fetch real-time prices
+    codes = list(candidates.keys())
+    try:
+        from astock_data.market.tencent_finance import get_valuation
+        quotes = get_valuation(codes)
+    except Exception as e:
+        logger.warning(f"获取行情失败，使用估算价格: {e}")
+        quotes = {}
+
+    trade_signals = []
+    per_trade_cash = (total_cash or 50_000) * max_per_trade_pct
+
+    for code, info in candidates.items():
+        q = quotes.get(code, {})
+        price = q.get("price", 0)
+        if not price or price <= 0:
+            logger.warning(f"{code} {info['name']} 行情数据异常，跳过")
+            continue
+
+        # Skip if already at limit-up (>=9% for main board, >=19% for GEM/STAR)
+        gain = q.get("change_pct", info.get("gain", 0))
+        limit_up = 19.0 if code.startswith(("300", "688")) else 9.0
+        if gain >= limit_up:
+            logger.info(f"{code} {info['name']} 已涨停(+{gain}%)，跳过")
+            continue
+
+        # Volume: per_trade_cash / price, round down to nearest 100 (A-share lot)
+        raw_volume = int(per_trade_cash / price)
+        volume = (raw_volume // 100) * 100
+        if volume < 100:
+            logger.info(f"{code} {info['name']} 资金不足1手(需{price*100:.0f})，跳过")
+            continue
+
+        trade_signals.append({
+            "type": "trade_signal",
+            "symbol": code,
+            "direction": "BUY",
+            "price": round(price, 2),
+            "volume": volume,
+            "reason": info["reason"],
+            "strategy": "early_momentum",
+            "confidence": round(info["confidence"], 2),
+            "sector": info["sector"],
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        })
+
+    logger.info(f"early→trade转换: {len(early_signals)}早期信号 → {len(trade_signals)}交易指令")
+    return trade_signals
+
+
 def _northbound_trend(northbound: list[dict]) -> str:
     """Determine northbound flow trend: INFLOW, OUTFLOW, or NEUTRAL."""
     if not northbound or len(northbound) < 5:

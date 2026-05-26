@@ -112,6 +112,59 @@ class FeishuAdapter(IMAdapter):
     def stop(self) -> None:
         self._running = False
 
+    def send_card(self, chat_id: str, card_dict: dict) -> SendResult:
+        """发送交互式卡片消息，返回 SendResult (含 message_id)。"""
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                token = _get_tenant_token(self._app_id, self._app_secret)
+                content = json.dumps(card_dict, ensure_ascii=False)
+                body = json.dumps({
+                    "receive_id": chat_id,
+                    "msg_type": "interactive",
+                    "content": content,
+                }).encode()
+                url = f"{FEISHU_DOMAIN}/open-apis/im/v1/messages?receive_id_type=chat_id"
+                req = Request(url, data=body, headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                })
+                resp = json.loads(urlopen(req, timeout=10).read())
+                msg_id = (resp.get("data") or {}).get("message_id", "")
+                if msg_id:
+                    logger.info(f"Feishu card sent, msg_id={msg_id}")
+                    return SendResult(True, message_id=msg_id)
+                logger.warning(f"Feishu card send no msg_id (attempt {attempt+1})")
+            except Exception as e:
+                logger.warning(f"Feishu card send failed (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        return SendResult(False, error="card send failed")
+
+    def update_card(self, message_id: str, card_dict: dict) -> bool:
+        """更新已发送的卡片消息（PATCH）。"""
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                token = _get_tenant_token(self._app_id, self._app_secret)
+                content = json.dumps(card_dict, ensure_ascii=False)
+                body = json.dumps({"content": content}).encode()
+                url = f"{FEISHU_DOMAIN}/open-apis/im/v1/messages/{message_id}"
+                req = Request(url, data=body, headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                }, method="PATCH")
+                resp = json.loads(urlopen(req, timeout=10).read())
+                ok = resp.get("code", -1) == 0
+                if ok:
+                    return True
+                logger.warning(f"Feishu card update failed: {resp.get('msg','')} (attempt {attempt+1})")
+            except Exception as e:
+                logger.warning(f"Feishu card update error (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        return False
+
     def startable(self) -> bool:
         return bool(self._app_id and self._app_secret)
 

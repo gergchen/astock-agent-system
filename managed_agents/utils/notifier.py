@@ -2,6 +2,9 @@
 
 import json
 import logging
+import re
+import threading
+import time
 from datetime import datetime, timedelta, time as dt_time
 from urllib.request import Request, urlopen
 
@@ -15,6 +18,20 @@ NOTIFY_WINDOW_END = dt_time(15, 0)
 
 # 系统活跃窗口 — 收盘即休眠
 SYSTEM_ACTIVE_END = dt_time(15, 5)
+
+# 全局去重 — 同一条通知只发一次（进程生命周期内）
+_NOTIFY_DEDUP: dict[str, float] = {}
+_NOTIFY_DEDUP_LOCK = threading.Lock()
+_NOTIFY_DEDUP_WINDOW = 86400  # 24h
+
+
+def _notify_fingerprint(title: str, body: str) -> str:
+    """从 title+body 生成不变量指纹：移除时间戳、数字、百分比、亿等易变成分."""
+    raw = f"{title}|{body}"
+    fp = re.sub(r'\d{1,2}:\d{2}', '', raw)  # 移除时间戳 09:35
+    fp = re.sub(r'[-+]?\d+\.?\d*%?亿?', '', fp)  # 移除数字/百分比/亿
+    fp = re.sub(r'\s+', '', fp)  # 压缩空白
+    return fp
 
 
 def is_notify_time() -> bool:
@@ -61,6 +78,16 @@ def notify(title: str, body: str = "", level: str = "info", force: bool = False)
     """
     # Always log alert to local audit file
     _file_alert(title, body, level)
+
+    # 全局去重：相同内容的通知不重复发送
+    fp = _notify_fingerprint(title, body)
+    with _NOTIFY_DEDUP_LOCK:
+        last = _NOTIFY_DEDUP.get(fp)
+        now_s = time.time()
+        if last and now_s - last < _NOTIFY_DEDUP_WINDOW:
+            logger.debug(f"通知去重跳过: {title}")
+            return
+        _NOTIFY_DEDUP[fp] = now_s
 
     if not force and not is_notify_time():
         return

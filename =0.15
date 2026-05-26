@@ -1,0 +1,67 @@
+Collecting easytrader
+  Downloading easytrader-0.23.7-py3-none-any.whl.metadata (2.5 kB)
+Requirement already satisfied: requests in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from easytrader) (2.33.1)
+Requirement already satisfied: six in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from easytrader) (1.17.0)
+Collecting easyutils (from easytrader)
+  Downloading easyutils-0.1.7.tar.gz (3.2 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting flask (from easytrader)
+  Downloading flask-3.1.3-py3-none-any.whl.metadata (3.2 kB)
+Collecting pywinauto==0.6.6 (from easytrader)
+  Downloading pywinauto-0.6.6-py3-none-any.whl.metadata (1.7 kB)
+Requirement already satisfied: pillow in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from easytrader) (12.2.0)
+Requirement already satisfied: pandas in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from easytrader) (3.0.2)
+Collecting comtypes (from pywinauto==0.6.6->easytrader)
+  Downloading comtypes-1.4.16-py3-none-any.whl.metadata (7.8 kB)
+Collecting pyquery (from easyutils->easytrader)
+  Downloading pyquery-2.0.1-py3-none-any.whl.metadata (9.0 kB)
+Collecting blinker>=1.9.0 (from flask->easytrader)
+  Downloading blinker-1.9.0-py3-none-any.whl.metadata (1.6 kB)
+Requirement already satisfied: click>=8.1.3 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from flask->easytrader) (8.4.0)
+Collecting itsdangerous>=2.2.0 (from flask->easytrader)
+  Downloading itsdangerous-2.2.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting jinja2>=3.1.2 (from flask->easytrader)
+  Using cached jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting markupsafe>=2.1.1 (from flask->easytrader)
+  Using cached markupsafe-3.0.3-cp314-cp314-win_amd64.whl.metadata (2.8 kB)
+Collecting werkzeug>=3.1.0 (from flask->easytrader)
+  Downloading werkzeug-3.1.8-py3-none-any.whl.metadata (4.0 kB)
+Requirement already satisfied: colorama in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from click>=8.1.3->flask->easytrader) (0.4.6)
+Requirement already satisfied: numpy>=2.3.3 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from pandas->easytrader) (2.4.4)
+Requirement already satisfied: python-dateutil>=2.8.2 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from pandas->easytrader) (2.9.0.post0)
+Requirement already satisfied: tzdata in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from pandas->easytrader) (2026.1)
+Requirement already satisfied: lxml>=2.1 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from pyquery->easyutils->easytrader) (6.0.2)
+Collecting cssselect>=1.2.0 (from pyquery->easyutils->easytrader)
+  Downloading cssselect-1.4.0-py3-none-any.whl.metadata (2.4 kB)
+Requirement already satisfied: charset_normalizer<4,>=2 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from requests->easytrader) (3.4.7)
+Requirement already satisfied: idna<4,>=2.5 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from requests->easytrader) (3.11)
+Requirement already satisfied: urllib3<3,>=1.26 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from requests->easytrader) (2.6.3)
+Requirement already satisfied: certifi>=2023.5.7 in c:\users\administrator\appdata\local\python\pythoncore-3.14-64\lib\site-packages (from requests->easytrader) (2026.2.25)
+Downloading easytrader-0.23.7-py3-none-any.whl (58 kB)
+Downloading pywinauto-0.6.6-py3-none-any.whl (365 kB)
+Downloading comtypes-1.4.16-py3-none-any.whl (296 kB)
+Downloading flask-3.1.3-py3-none-any.whl (103 kB)
+Downloading blinker-1.9.0-py3-none-any.whl (8.5 kB)
+Downloading itsdangerous-2.2.0-py3-none-any.whl (16 kB)
+Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+Downloading markupsafe-3.0.3-cp314-cp314-win_amd64.whl (15 kB)
+Downloading werkzeug-3.1.8-py3-none-any.whl (226 kB)
+Downloading pyquery-2.0.1-py3-none-any.whl (22 kB)
+Downloading cssselect-1.4.0-py3-none-any.whl (18 kB)
+Building wheels for collected packages: easyutils
+  Building wheel for easyutils (pyproject.toml): started
+  Building wheel for easyutils (pyproject.toml): finished with status 'done'
+  Created wheel for easyutils: filename=easyutils-0.1.7-py3-none-any.whl size=3849 sha256=c87550c06e78b25412b1af253447aa0230d39e4c82b0b4fd4e034c8e50610ddb
+  Stored in directory: c:\users\administrator\appdata\local\pip\cache\wheels\5a\2e\5d\4e562e5ea050f464f3c4d1f8850eb0d3be9d519a0ab4207d00
+Successfully built easyutils
+Installing collected packages: markupsafe, itsdangerous, cssselect, comtypes, blinker, werkzeug, pywinauto, pyquery, jinja2, flask, easyutils, easytrader
+
+Successfully installed blinker-1.9.0 comtypes-1.4.16 cssselect-1.4.0 easytrader-0.23.7 easyutils-0.1.7 flask-3.1.3 itsdangerous-2.2.0 jinja2-3.1.6 markupsafe-3.0.3 pyquery-2.0.1 pywinauto-0.6.6 werkzeug-3.1.8
+
+[notice] A new release of pip is available: 25.3 -> 26.1.1
+[notice] To update, run: C:\Users\Administrator\AppData\Local\Python\pythoncore-3.14-64\python.exe -m pip install --upgrade pip

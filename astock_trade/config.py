@@ -130,6 +130,13 @@ class TradeConfig:
     # ── Broker ───────────────────────────────────────────────
     broker_type: str = "mock"             # "mock" or "ths"
     ths_exe_path: str | None = None       # 同花顺 xiadan.exe 路径
+    mock_initial_cash: float = 1_000_000.0  # MockBroker 初始资金
+
+    # ── Captcha (打码平台) ──────────────────────────────────
+    captcha_platform: str = ""            # "super_eagle" / ""(不启用)
+    captcha_username: str = ""            # 超级鹰账号
+    captcha_password: str = ""            # 超级鹰密码/识别密匙
+    captcha_soft_id: str = "956802"       # 软件ID
 
     @property
     def sentinel_alerts(self) -> dict:

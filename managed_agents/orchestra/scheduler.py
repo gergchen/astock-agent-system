@@ -298,15 +298,50 @@ class Scheduler:
                     notify("盘中机会", "\n".join(lines), "warn", force=True)
 
             # 有早期信号 → 触发风控审查 + 交易执行
-            if early_signals:
+            trade_count = r.get("trade_count", 0)
+            if trade_count > 0:
+                logger.info(f"自动交易流水线: {trade_count}个交易指令待处理")
+                executed = []
+                try:
+                    risk = self._registry.get("risk-officer")
+                    decisions = risk.review_pending()
+                    approved = sum(1 for d in decisions if d.get("decision") == "APPROVED")
+                    rejected = sum(1 for d in decisions if d.get("decision") == "REJECTED")
+                    logger.info(f"风控结果: {approved}批准 {rejected}拒绝")
+                except KeyError:
+                    logger.warning("风控官未注册")
+                    decisions = []
+
+                try:
+                    trader = self._registry.get("day-trader")
+                    results = trader.execute_pending()
+                    success = sum(1 for r in results if r.get("success"))
+                    failed = sum(1 for r in results if not r.get("success"))
+                    logger.info(f"交易执行: {success}成功 {failed}失败")
+                    if results:
+                        lines = []
+                        for r in results[:5]:
+                            if r.get("success"):
+                                res = r["result"]
+                                lines.append(f"  🟢 {res['symbol']} {res['direction']} {res['price']}x{res['volume']}")
+                            elif r.get("error"):
+                                dec = r.get("decision", {})
+                                sym = (dec.get("signal") or {}).get("symbol", "?")
+                                lines.append(f"  🔴 {sym} 失败: {r['error']}")
+                        if lines:
+                            notify("自动交易执行", "\n".join(lines), "info", force=True)
+                            executed = lines
+                except KeyError:
+                    logger.warning("交易员未注册")
+
+                if not executed:
+                    notify("自动交易", f"风控通过{approved}个，但无执行结果", "info", force=True)
+            elif early_signals:
+                logger.info(f"有早期信号({len(early_signals)}个)但无可执行的交易指令")
+                # 仍然触发风控检查（可能有历史信号）
                 try:
                     risk = self._registry.get("risk-officer")
                     risk.review_pending()
-                except KeyError:
-                    pass
-                try:
-                    trader = self._registry.get("day-trader")
-                    trader.execute_pending()
                 except KeyError:
                     pass
 
