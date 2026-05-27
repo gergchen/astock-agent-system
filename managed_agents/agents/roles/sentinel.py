@@ -4,7 +4,8 @@
 - 交易时段内每 N 秒扫描一次市场（大盘指数、北向资金、快讯）
 - 检测到异动立即推送预警到微信
 - 大盘砸盘（最高优先级，不受冷却限制）
-- 北向资金大幅流入/流出
+- 北向资金大幅流入/流出（阈值±50亿起，减少噪音）
+- 热点板块扫描 + 个股推荐（涨停≥5只触发）
 - 财联社突发重大快讯（仅保留真正突发事件）
 """
 
@@ -23,10 +24,12 @@ SENTINEL_PROMPT = """你是一个A股市场哨兵，负责实时盯盘和异动�
 1. 每120秒扫描一次市场数据（大盘指数、北向资金、快讯）
 2. 发现异动立即生成简洁预警报告（≤200字）
 3. 判断异动严重程度：🟢普通 🟡关注 🔴紧急
+4. 热点板块监测 + 个股推荐（基于交易经验库高胜率策略筛选）
 
 ## 注意
 - 大盘砸盘预警优先于一切
 - 语言简洁，直接给结论
+- 板块推荐必须附带具体个股代码
 """
 
 # 快讯关键词 — 只保留真正的突发事件
@@ -63,6 +66,7 @@ class Sentinel(BaseAgent):
         self._last_alert_time: float = 0            # 上次普通告警时间戳
         self._index_alert_level: dict[str, str] = {}    # 指数 -> 已告警的最高级别
         self._last_index_alert_time: float = 0          # 上次指数告警时间戳
+        self._alerted_sectors: set = set()               # 已告警过的热点板块(当日去重)
 
     @staticmethod
     def _is_trading_time() -> bool:
@@ -81,6 +85,8 @@ class Sentinel(BaseAgent):
             "get_northbound": self.skills_api.get_northbound,
             "get_flash_news": self.skills_api.get_flash_news,
             "get_index_quotes": self.skills_api.get_index_quotes,
+            "get_hotspots": self.skills_api.get_hotspots,
+            "get_sector_hotspots": self.skills_api.get_sector_hotspots,
         })
 
     def scan(self) -> dict:
@@ -92,6 +98,7 @@ class Sentinel(BaseAgent):
 
         priority_alerts = []  # 大盘异动 — 必推，不受冷却限制
         normal_alerts = []    # 其他告警
+        hsi: list[dict] = []  # 热点板块告警结果
         current_hour = datetime.now().hour
         now_min = datetime.now().minute
         is_market_open = (current_hour == 9 and now_min >= 30) or (10 <= current_hour < 15)
@@ -112,7 +119,16 @@ class Sentinel(BaseAgent):
             except Exception as e:
                 logger.error(f"北向扫描失败: {e}")
 
-        # 3. 扫描快讯
+        # 3. 扫描热点板块（含个股推荐 + 策略匹配）
+        if is_market_open:
+            try:
+                nb_total = self._last_northbound  # 使用上次北向累计值做情绪参考
+                hsi = self._check_hotspot_alert(northbound_total=nb_total)
+                normal_alerts += hsi
+            except Exception as e:
+                logger.error(f"热点扫描失败: {e}")
+
+        # 4. 扫描快讯
         try:
             news = self.skills_api.get_flash_news(limit=5)
             normal_alerts += self._check_breaking_news(news)
@@ -189,29 +205,128 @@ class Sentinel(BaseAgent):
 
         if self._last_northbound is not None:
             delta = total - self._last_northbound
-            if abs(delta) >= 20:
+            if abs(delta) >= 50:
                 direction = "流入" if delta > 0 else "流出"
                 if direction != self._alerted_nb_direction:
                     self._alerted_nb_direction = direction
                     alerts.append({
-                        "level": "紧急" if abs(delta) >= 30 else "关注",
+                        "level": "紧急" if abs(delta) >= 80 else "关注",
                         "title": f"北向资金快速{direction}: {delta:+.1f}亿",
                         "detail": f"累计: {total:+.1f}亿",
                     })
 
-        if total <= -50 and self._alerted_nb_direction != "流出":
+        if total <= -100 and self._alerted_nb_direction != "流出":
             self._alerted_nb_direction = "流出"
             alerts.append({
                 "level": "紧急",
                 "title": f"北向大幅流出: {total:.1f}亿",
                 "detail": "外资恐慌，全市场承压",
             })
-        elif total >= 50 and self._alerted_nb_direction != "流入":
+        elif total >= 100 and self._alerted_nb_direction != "流入":
             self._alerted_nb_direction = "流入"
             alerts.append({
                 "level": "紧急",
                 "title": f"北向大幅流入: {total:.1f}亿",
                 "detail": "外资抢筹，市场情绪回暖",
+            })
+
+        return alerts
+
+    def _check_hotspot_alert(self, northbound_total: float | None = None) -> list[dict]:
+        """扫描热点板块，结合交易经验策略胜率 + 市场情绪做个股推荐。
+
+        逻辑:
+        1. 从经验库加载高胜率策略（win_rate≥60%, 样本≥2）
+        2. 扫描今日热点板块（涨停/大涨≥5只触发）
+        3. 结合北向资金方向判断市场情绪
+        4. 匹配策略 → 板块 → 个股的链路，输出有策略依据的推荐
+        """
+        alerts = []
+
+        # 1. 加载经验库策略胜率
+        try:
+            from managed_agents.experience.pattern_learner import get_all_patterns
+            patterns = get_all_patterns()
+        except Exception:
+            patterns = {}
+
+        good_strategies: list[dict] = []
+        for key, val in patterns.items():
+            if key.startswith("pattern:strategy:") and val.get("type") == "strategy_win_rate":
+                if val.get("win_rate", 0) >= 0.6 and val.get("total", 0) >= 2:
+                    good_strategies.append(val)
+        # 按胜率降序排列
+        good_strategies.sort(key=lambda x: (x.get("win_rate", 0), x.get("total", 0)), reverse=True)
+
+        # 2. 扫描热点板块
+        try:
+            sectors = self.skills_api.get_sector_hotspots()
+            hot_sectors = [
+                s for s in sectors.get("sectors", [])
+                if s["count"] >= 5 and s["name"] not in self._alerted_sectors
+            ]
+            if not hot_sectors:
+                return alerts
+        except Exception as e:
+            logger.error(f"热点板块扫描失败: {e}")
+            return alerts
+
+        # 3. 市场情绪判断（从北向资金方向看多空）
+        sentiment = "中性"
+        if northbound_total is not None:
+            if northbound_total >= 30:
+                sentiment = "偏多"
+            elif northbound_total <= -30:
+                sentiment = "偏空"
+
+        # 4. 获取今日热点股票列表
+        try:
+            hotspot_data = self.skills_api.get_hotspots()
+            stocks = hotspot_data.get("top_stocks", [])
+        except Exception:
+            stocks = []
+
+        # 5. 构建板块 → 策略匹配标签
+        strategy_context = ""
+        if good_strategies:
+            top_three = good_strategies[:3]
+            strategy_context = " | ".join(
+                f"{s['strategy']}({s['win_rate']:.0%}, {s['avg_pnl_pct']:+.1f}%)"
+                for s in top_three
+            )
+
+        for sector in hot_sectors[:3]:  # 最多推3个板块
+            self._alerted_sectors.add(sector["name"])
+            matched = [s for s in stocks if sector["name"] in s.get("reason", "")]
+            stock_list = matched[:3]
+
+            # 个股推荐
+            picks = [f"{stk['name']}({stk['code']})" for stk in stock_list]
+
+            stock_str = "、".join(picks) if picks else ""
+
+            detail = f"涨停/大涨{sector['count']}只"
+            if stock_str:
+                detail += f"，关注: {stock_str}"
+            if sentiment != "中性":
+                detail += f" | 情绪{sentiment}"
+            if strategy_context:
+                detail += f"\n策略: {strategy_context}"
+
+            alerts.append({
+                "level": "关注",
+                "title": f"热点板块: {sector['name']}",
+                "detail": detail,
+                "strategy_context": strategy_context,  # 策略上下文供后续推送格式化用
+            })
+
+        # 如果有高胜率策略但本次没有板块推荐（均已告警过），仍输出策略上下文
+        if not alerts and strategy_context:
+            alerts.append({
+                "level": "普通",
+                "title": "策略参考",
+                "detail": f"经验库高胜率策略: {strategy_context}",
+                "strategy_context": strategy_context,
             })
 
         return alerts
